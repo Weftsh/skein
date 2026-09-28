@@ -15,7 +15,7 @@ fails without it.**
 | Gate | What it proves | Where |
 |---|---|---|
 | **test** | `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace` — against a real PostgreSQL and a real MinIO, never a mock | CI job `test` |
-| **clients** | the real `npm` (and each client as its door lands) publishes to and installs from a real server, and a refusal reaches the person as a sentence | CI job `clients`, `crates/skein-server/tests/clients_e2e.rs` |
+| **clients** | the real `npm`, `mvn`, `twine` and `pip`, `cargo` and `docker` publish to and install from a real server, and a refusal reaches the person as a sentence — in the status line, for the clients that print nothing else | CI job `clients`, `crates/skein-server/tests/clients_e2e.rs` |
 | **ui** | every page, dark and light, desktop and phone, in a real Chromium: no console error the walk did not provoke, no uncaught error, nothing scrolling sideways, no `null` rendered as text, markup from data never runs — and the licence flow does what it says | CI job `ui`, `crates/skein-server/tests/ui_e2e.rs` driving `tests/ui/walk.mjs` |
 | **image** | the image builds, Compose brings it up healthy, and the real npm publishes and installs through it | CI job `image`, `scripts/smoke.sh` |
 
@@ -26,7 +26,9 @@ scripts/fetch-minio.sh             # once; the testkit starts its own MinIO
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace             # needs PostgreSQL binaries on the machine
-SKEIN_REQUIRE_CLIENTS=npm cargo test -p skein-server --test clients_e2e
+SKEIN_REQUIRE_CLIENTS=npm,python3,mvn,twine,pip,cargo,docker \
+  SKEIN_PYTHON=path/to/venv/bin/python \
+  cargo test -p skein-server --test clients_e2e
 (cd crates/skein-server/tests/ui && npm ci && npx playwright install chromium)
 SKEIN_REQUIRE_CLIENTS=browser cargo test -p skein-server --test ui_e2e
 ```

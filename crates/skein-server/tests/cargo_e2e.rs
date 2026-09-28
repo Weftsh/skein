@@ -483,23 +483,27 @@ fn hostile_publishes_are_refused_and_the_server_keeps_serving() {
         .0,
         200
     );
-    for (method, url, body) in [
+    // Each refused in the words of what was tried: a yank is not a
+    // publish, and saying so sent a reader looking for the wrong thing.
+    for (method, url, body, act) in [
         (
             "PUT",
             new.clone(),
             Some(publish_body("acme-widget", "2.0.0", Some("MIT"), b"x")),
+            "publish to this registry",
         ),
         (
             "DELETE",
             format!("{b}/api/v1/crates/acme-widget/1.0.0/yank"),
             None,
+            "yank a version in this registry",
         ),
     ] {
         let (status, err) = cargo_req(method, &url, &reader, body.as_deref());
         assert_eq!(status, 403, "{method} {url}");
         assert_eq!(
             detail(&err),
-            "rita is a reader here, and a reader may not publish to this registry"
+            format!("rita is a reader here, and a reader may not {act}")
         );
     }
     // A publisher whose *token* was minted read-only is told the token

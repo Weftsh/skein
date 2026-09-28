@@ -346,10 +346,10 @@ pub async fn upload(State(state): State<SharedState>, headers: HeaderMap, body: 
     // published file changing its bytes, which is the one thing a
     // registry promises cannot happen.
     //
-    // Checked before the bytes are stored, so a refusal costs nothing.
-    // Two uploads racing the same filename into two different versions
-    // can both pass this check; closing that needs the uniqueness in the
-    // schema, and it takes a publisher racing their own upload.
+    // Checked before the bytes are stored, so a refusal costs nothing,
+    // and again where the file is recorded — under a lock on the
+    // project, so two uploads racing one filename into two versions
+    // cannot both land (`add_file_unique_in_package`).
     match file_named(&state, &pkg.id, &up.filename) {
         Ok(Some(_)) => return already_uploaded(&up, &pkg.name),
         Ok(None) => {}
@@ -408,7 +408,7 @@ pub async fn upload(State(state): State<SharedState>, headers: HeaderMap, body: 
         }
     }
 
-    match packages::add_file(&state.db, &version_id, &file) {
+    match packages::add_file_unique_in_package(&state.db, &version_id, &file) {
         Ok(()) => {}
         Err(packages::PublishError::Exists) => return already_uploaded(&up, &pkg.name),
         Err(packages::PublishError::Other(e)) => return internal(e),

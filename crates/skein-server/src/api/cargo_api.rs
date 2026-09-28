@@ -84,7 +84,16 @@ fn open(
     headers: &HeaderMap,
     need: Scope,
 ) -> Result<(Org, Principal), Response> {
-    let p = registry_door::authorize(state, headers, need, refusal)?;
+    open_to(state, headers, need, None)
+}
+
+fn open_to(
+    state: &SharedState,
+    headers: &HeaderMap,
+    need: Scope,
+    what: Option<&str>,
+) -> Result<(Org, Principal), Response> {
+    let p = registry_door::authorize_to(state, headers, need, what, refusal)?;
     let org = registry_door::eco_org(state, headers, Ecosystem::Cargo)?;
     Ok((org, p))
 }
@@ -364,7 +373,12 @@ pub async fn yank(
     Path((name, version, verb)): Path<(String, String, String)>,
     headers: HeaderMap,
 ) -> Response {
-    let (org, principal) = match open(&state, &headers, Scope::PackageWrite) {
+    let what = if verb == "unyank" {
+        "unyank a version in this registry"
+    } else {
+        "yank a version in this registry"
+    };
+    let (org, principal) = match open_to(&state, &headers, Scope::PackageWrite, Some(what)) {
         Ok(x) => x,
         Err(r) => return r,
     };

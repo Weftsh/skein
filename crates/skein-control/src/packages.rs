@@ -284,6 +284,32 @@ pub fn normalize_name(eco: Ecosystem, name: &str) -> Result<String, String> {
 /// wrong silently installs different bytes than were reviewed. npm
 /// treats `1.0` and `1.0.0` as distinct, and so do we. What this refuses
 /// is only what cannot be stored or addressed safely.
+/// The key a version is matched on within its package: what
+/// [`normalize_version`] makes of it, except that an OCI tag keeps its
+/// case. The distribution spec, docker and every other registry treat
+/// `V1` and `v1` as two tags; matching them as one made `docker push
+/// app:V1` silently move `app:v1`, and a deployment pinned to `v1` pulled
+/// an image nobody tagged `v1`.
+pub fn version_key(eco: Ecosystem, version: &str) -> Result<String, String> {
+    let lowered = normalize_version(version)?;
+    Ok(match eco {
+        Ecosystem::Oci => version.trim().to_string(),
+        _ => lowered,
+    })
+}
+
+fn package_ecosystem(db: &ControlDb, package_id: &str) -> Result<Ecosystem, String> {
+    let row = db
+        .lock()
+        .query_opt(
+            "SELECT ecosystem FROM packages WHERE id = $1",
+            &[&package_id],
+        )
+        .map_err(|e| format!("package ecosystem: {e}"))?
+        .ok_or_else(|| format!("no package {package_id}"))?;
+    eco_of(&row.get::<_, String>(0))
+}
+
 pub fn normalize_version(version: &str) -> Result<String, String> {
     let v = version.trim();
     if v.is_empty() {
@@ -716,7 +742,8 @@ pub fn publish_version(
     prov: &Provenance<'_>,
     now: i64,
 ) -> Result<PackageVersion, PublishError> {
-    let normalized = normalize_version(version).map_err(PublishError::Other)?;
+    let eco = package_ecosystem(db, package_id).map_err(PublishError::Other)?;
+    let normalized = version_key(eco, version).map_err(PublishError::Other)?;
     let metadata = metadata.to_string();
     let size: i64 = files.iter().map(|f| f.size_bytes).sum();
     let id = ulid();
@@ -814,9 +841,62 @@ pub fn publish_version(
 /// reads on the screen is the whole release rather than whichever file
 /// happened to arrive first.
 pub fn add_file(db: &ControlDb, version_id: &str, f: &PackageFile) -> Result<(), PublishError> {
+    add_file_inner(db, version_id, f, false)
+}
+
+/// [`add_file`], for an ecosystem that fetches a file by package and
+/// filename with no version in the URL — PyPI's `/files/<name>/<file>`
+/// — where a filename has to name one file across **every** version, or
+/// a second upload of it would change the bytes at the first one's URL.
+///
+/// The check and the insert happen under a lock on the package's row,
+/// so two uploads racing one filename into two versions — two replicas,
+/// or one `twine upload` retried — cannot both pass. Not a unique index:
+/// other ecosystems legitimately repeat a filename across versions (an
+/// OCI layer two tags share is one file named by its digest).
+pub fn add_file_unique_in_package(
+    db: &ControlDb,
+    version_id: &str,
+    f: &PackageFile,
+) -> Result<(), PublishError> {
+    add_file_inner(db, version_id, f, true)
+}
+
+fn add_file_inner(
+    db: &ControlDb,
+    version_id: &str,
+    f: &PackageFile,
+    package_wide: bool,
+) -> Result<(), PublishError> {
     let added = db
         .lock()
         .transaction(|tx| {
+            if package_wide {
+                // Two statements, not one: under READ COMMITTED a
+                // statement reads the snapshot taken when it *started*,
+                // so a check in the same statement as the lock reads
+                // from before the wait and misses the file the holder
+                // just committed. That version let 7 of 8 racers land.
+                let pkg: String = tx
+                    .query_one(
+                        "SELECT p.id FROM packages p \
+                         JOIN package_versions v ON v.package_id = p.id \
+                         WHERE v.id = $1 FOR UPDATE OF p",
+                        &[&version_id],
+                    )?
+                    .get(0);
+                let taken: bool = tx
+                    .query_one(
+                        "SELECT EXISTS (SELECT 1 FROM package_files f \
+                             JOIN package_versions v ON v.id = f.version_id \
+                             WHERE v.package_id = $1 AND f.filename = $2)",
+                        &[&pkg, &f.filename],
+                    )?
+                    .get(0);
+                if taken {
+                    return Ok(0);
+                }
+            }
             let n = tx.execute(
                 "INSERT INTO package_files \
                      (version_id, filename, digest, size_bytes, content_type, digests) \
@@ -876,7 +956,7 @@ pub fn version_by_number(
     package_id: &str,
     version: &str,
 ) -> Result<Option<PackageVersion>, String> {
-    let normalized = normalize_version(version)?;
+    let normalized = version_key(package_ecosystem(db, package_id)?, version)?;
     Ok(db
         .lock()
         .query_opt(
@@ -1807,6 +1887,173 @@ mod tests {
             content_type: "application/octet-stream".into(),
             digests: r#"{"sha1":"abc"}"#.into(),
         }
+    }
+
+    /// Where a filename is fetched without a version, it names one file
+    /// across the whole package: a second version cannot carry it, and
+    /// two uploads racing it into two versions from two connections —
+    /// two replicas — land exactly one.
+    #[test]
+    fn a_filename_can_be_unique_across_a_package_even_under_a_race() {
+        let (db, org) = world("pkg_file_race");
+        let p = ensure(&db, &org, Ecosystem::Pypi, "widget", ORIGIN_LOCAL, 1).unwrap();
+        let version = |v: &str| {
+            publish_version(
+                &db,
+                &p.id,
+                v,
+                &License::Unknown,
+                "{}",
+                &[],
+                &Provenance::default(),
+                10,
+            )
+            .unwrap()
+            .id
+        };
+        let one = version("1.0.0");
+        let two = version("2.0.0");
+        let wheel = file("widget-1.0.0-py3-none-any.whl", 10);
+        add_file_unique_in_package(&db, &one, &wheel).unwrap();
+        assert!(matches!(
+            add_file_unique_in_package(&db, &two, &wheel),
+            Err(PublishError::Exists)
+        ));
+        // The plain form is per version, as other ecosystems need.
+        add_file(&db, &two, &file("layer", 1)).unwrap();
+        add_file(&db, &one, &file("layer", 1)).unwrap();
+
+        let url = skein_testkit::pg::test_db_url("pkg_file_race_conns");
+        let setup = ControlDb::open(&url).unwrap();
+        let org = registry::create_org(&setup, "acme").unwrap().id;
+        let p = ensure(&setup, &org, Ecosystem::Pypi, "racer", ORIGIN_LOCAL, 1).unwrap();
+        let mut versions = Vec::new();
+        for i in 0..8 {
+            versions.push(
+                publish_version(
+                    &setup,
+                    &p.id,
+                    &format!("{i}.0.0"),
+                    &License::Unknown,
+                    "{}",
+                    &[],
+                    &Provenance::default(),
+                    10,
+                )
+                .unwrap()
+                .id,
+            );
+        }
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(versions.len()));
+        let handles: Vec<_> = versions
+            .into_iter()
+            .map(|v| {
+                let (url, barrier) = (url.clone(), barrier.clone());
+                std::thread::spawn(move || {
+                    let conn = ControlDb::open(&url).unwrap();
+                    barrier.wait();
+                    add_file_unique_in_package(&conn, &v, &file("racer-0.0.0.tar.gz", 5)).is_ok()
+                })
+            })
+            .collect();
+        let landed = handles
+            .into_iter()
+            .map(|h| h.join().unwrap())
+            .filter(|ok| *ok)
+            .count();
+        assert_eq!(landed, 1, "one filename, one file");
+    }
+
+    /// An OCI tag is matched exactly; every other ecosystem's versions
+    /// case-insensitively, as before — `1.0.0-Beta` after `1.0.0-beta` is
+    /// still the same npm version, refused as a republish.
+    #[test]
+    fn an_oci_tag_keeps_its_case_and_other_versions_do_not() {
+        assert_eq!(version_key(Ecosystem::Oci, " V1 ").unwrap(), "V1");
+        assert_eq!(
+            version_key(Ecosystem::Npm, "1.0.0-Beta").unwrap(),
+            "1.0.0-beta"
+        );
+        assert!(
+            version_key(Ecosystem::Oci, "a/b").is_err(),
+            "still validated"
+        );
+
+        let (db, org) = world("pkg_tag_case");
+        let publish = |pkg: &str, v: &str| {
+            publish_version(
+                &db,
+                pkg,
+                v,
+                &License::Unknown,
+                "{}",
+                &[file(&format!("{v}.json"), 1)],
+                &Provenance::default(),
+                10,
+            )
+        };
+        let image = ensure(&db, &org, Ecosystem::Oci, "acme/app", ORIGIN_LOCAL, 1).unwrap();
+        publish(&image.id, "v1").unwrap();
+        publish(&image.id, "V1").expect("V1 is another tag");
+        assert_eq!(
+            version_by_number(&db, &image.id, "V1")
+                .unwrap()
+                .unwrap()
+                .version,
+            "V1"
+        );
+        assert_eq!(
+            version_by_number(&db, &image.id, "v1")
+                .unwrap()
+                .unwrap()
+                .version,
+            "v1"
+        );
+        assert!(version_by_number(&db, &image.id, "V2").unwrap().is_none());
+
+        let widget = ensure(&db, &org, Ecosystem::Npm, "widget", ORIGIN_LOCAL, 1).unwrap();
+        publish(&widget.id, "1.0.0-beta").unwrap();
+        assert!(matches!(
+            publish(&widget.id, "1.0.0-Beta"),
+            Err(PublishError::Exists)
+        ));
+        assert!(version_by_number(&db, &widget.id, "1.0.0-BETA")
+            .unwrap()
+            .is_some());
+
+        // Migration 0003 re-keys a tag stored lowercased by an older
+        // build — which could hold only one of `latest` and `Latest` —
+        // and leaves every other ecosystem's rows alone.
+        let old = ensure(&db, &org, Ecosystem::Oci, "acme/old", ORIGIN_LOCAL, 1).unwrap();
+        publish(&old.id, "Latest").unwrap();
+        db.lock()
+            .execute(
+                "UPDATE package_versions SET normalized_version = lower(version) \
+                 WHERE package_id = $1",
+                &[&old.id],
+            )
+            .unwrap();
+        assert!(
+            version_by_number(&db, &old.id, "Latest").unwrap().is_none(),
+            "simulated old row"
+        );
+        db.lock().execute(crate::db::MIGRATIONS[2], &[]).unwrap();
+        assert_eq!(
+            version_by_number(&db, &old.id, "Latest")
+                .unwrap()
+                .unwrap()
+                .version,
+            "Latest"
+        );
+        assert!(version_by_number(&db, &old.id, "latest").unwrap().is_none());
+        assert_eq!(
+            version_by_number(&db, &widget.id, "1.0.0-Beta")
+                .unwrap()
+                .unwrap()
+                .version,
+            "1.0.0-beta",
+            "an npm row was re-keyed"
+        );
     }
 
     #[test]

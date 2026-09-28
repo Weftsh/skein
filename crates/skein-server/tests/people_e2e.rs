@@ -698,3 +698,91 @@ fn an_update_is_audited_as_what_it_changed() {
     assert_eq!(keys(updates[2]), ["display_name", "user"], "{}", updates[2]);
     assert_eq!(updates[2]["display_name"], "Rita R.");
 }
+
+/// A refusal names what was attempted. `package:write` covers a publish
+/// and a yank, and every refusal of it used to say "may not publish" —
+/// so a reader's `cargo yank` sent them looking for a publish they never
+/// tried. The class, across every door where the act is not a publish.
+#[test]
+fn a_refusal_names_what_was_attempted() {
+    let bucket = Minio::shared().bucket("people-verbs");
+    let server = spawn(&bucket.base_url, "people-verbs");
+    let admin = server.bootstrap("acme");
+    let (_, reader) = server.person(&admin, "rita", "reader", &["org:read"]);
+    let (_, narrow) = server.person(&admin, "pat", "publisher", &["package:read"]);
+    let basic = |t: &str| format!("Basic {}", common::b64(format!("skein:{t}").as_bytes()));
+    let cases: Vec<(&str, String, String, &str)> = vec![
+        (
+            "DELETE",
+            "/cargo/api/v1/crates/widget/1.0.0/yank".into(),
+            reader.clone(),
+            "may not yank a version",
+        ),
+        (
+            "PUT",
+            "/cargo/api/v1/crates/widget/1.0.0/unyank".into(),
+            reader.clone(),
+            "may not unyank a version",
+        ),
+        (
+            "DELETE",
+            "/v2/acme/app/manifests/v1".into(),
+            basic(&reader),
+            "may not delete tags",
+        ),
+        (
+            "PUT",
+            "/v2/acme/app/manifests/v1".into(),
+            basic(&reader),
+            "may not push to this registry",
+        ),
+        (
+            "POST",
+            "/api/v1/packages/01aaaaaaaaaaaaaaaaaaaaaaaa/versions/1.0.0/yank".into(),
+            format!("Bearer {reader}"),
+            "may not yank or unyank a version",
+        ),
+        // The token, not the role, is the limit: said so, with the act.
+        (
+            "DELETE",
+            "/cargo/api/v1/crates/widget/1.0.0/yank".into(),
+            narrow.clone(),
+            "not minted with package:write and so may not yank",
+        ),
+    ];
+    for (method, path, auth, want) in cases {
+        let r = server.raw(
+            method,
+            &path,
+            &[
+                ("Authorization", auth.as_str()),
+                ("Content-Type", "application/json"),
+            ],
+            Some(br#"{"yanked": true}"#),
+        );
+        assert_eq!(r.status, 403, "{method} {path}: {}", r.text());
+        assert!(r.text().contains(want), "{method} {path}: {}", r.text());
+        assert!(
+            !r.text().contains("publish"),
+            "{method} {path}: {}",
+            r.text()
+        );
+    }
+    // A publish is still called one.
+    let r = server.raw(
+        "PUT",
+        "/npm/widget",
+        &[
+            ("Authorization", &format!("Bearer {reader}")),
+            ("Content-Type", "application/json"),
+        ],
+        Some(b"{}"),
+    );
+    assert_eq!(r.status, 403, "{}", r.text());
+    assert!(
+        r.text().contains("may not publish to this registry"),
+        "{}",
+        r.text()
+    );
+    assert!(server.healthy());
+}

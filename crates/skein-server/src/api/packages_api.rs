@@ -271,7 +271,13 @@ pub async fn yank(
     Json(body): Json<YankBody>,
 ) -> Response {
     let org = state.org();
-    let caller = match authx::require(&state.db, &headers, Scope::PackageWrite, Challenge::None) {
+    let caller = match authx::require_to(
+        &state.db,
+        &headers,
+        Scope::PackageWrite,
+        Challenge::None,
+        "yank or unyank a version",
+    ) {
         Ok(p) => p,
         Err(r) => return r,
     };

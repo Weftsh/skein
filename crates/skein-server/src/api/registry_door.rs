@@ -104,15 +104,29 @@ pub fn authorize(
     need: Scope,
     refuse: Refusal,
 ) -> Result<Principal, Response> {
+    authorize_to(state, headers, need, None, refuse)
+}
+
+/// [`authorize`], naming what was attempted when it is not what the
+/// scope's own words say — a yank, which needs `package:write` and is not
+/// a publish.
+pub fn authorize_to(
+    state: &SharedState,
+    headers: &HeaderMap,
+    need: Scope,
+    what: Option<&str>,
+    refuse: Refusal,
+) -> Result<Principal, Response> {
     let headers = &with_scheme(headers);
     let Some(p) = authx::principal(&state.db, headers, authx::Challenge::Basic)? else {
         return Err(authx::unauthorized(authx::Challenge::Basic));
     };
     if !p.allows(need) {
-        return Err(refuse(
-            StatusCode::FORBIDDEN,
-            authx::refusal_sentence(&p, need),
-        ));
+        let sentence = match what {
+            Some(w) => authx::refusal_sentence_to(&p, need, w),
+            None => authx::refusal_sentence(&p, need),
+        };
+        return Err(refuse(StatusCode::FORBIDDEN, sentence));
     }
     Ok(p)
 }

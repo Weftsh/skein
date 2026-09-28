@@ -127,7 +127,13 @@ pub async fn any(
     } else {
         Scope::PackageRead
     };
-    let principal = match registry_door::authorize(&state, &headers, need, refusal) {
+    // A push is a publish in docker's words; a DELETE here removes a tag.
+    let what = match (writing, &method) {
+        (true, &Method::DELETE) => Some("delete tags in this registry"),
+        (true, _) => Some("push to this registry"),
+        _ => None,
+    };
+    let principal = match registry_door::authorize_to(&state, &headers, need, what, refusal) {
         Ok(p) => p,
         Err(r) => return r,
     };

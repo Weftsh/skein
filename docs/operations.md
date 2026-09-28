@@ -50,7 +50,7 @@ Everything is the environment.
 | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_REGION` | — | Credentials for the bucket. Every request is SigV4-signed when these are set. `AWS_REGION` defaults to `us-east-1`. |
 | `SKEIN_STORE_CREATE_BUCKET` | `false` | Create the bucket on start if it does not exist. Path-style URLs only — for MinIO and other self-hosted stores; a bucket on AWS should be created on purpose, with its own policy. |
 | `SKEIN_BIND` | `0.0.0.0:8080` | Where to listen. |
-| `SKEIN_PUBLIC_URL` | `http://localhost:8080` | Where clients reach Skein. Written into the documents a registry hands out (an npm tarball URL), and decides whether the session cookie is `Secure`. |
+| `SKEIN_PUBLIC_URL` | `http://localhost:8080` | Where clients reach Skein. Written into the documents a registry hands out — an npm tarball URL, Cargo's `config.json` — and decides whether the session cookie is `Secure`. |
 | `SKEIN_UPSTREAM_NPM` | `https://registry.npmjs.org` | The upstream the npm pull-through proxy reads from, when npm is in `proxy` mode. |
 | `SKEIN_UPSTREAM_ALLOW_PRIVATE` | `false` | Admit an upstream inside a private network — an internal mirror. It must still be HTTPS unless it is on loopback. |
 | `SKEIN_GC_INTERVAL_SECS` | `3600` | How often unreferenced package bytes are collected. `0` switches the collector off. |

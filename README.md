@@ -10,10 +10,11 @@ bucket. Publish with the tools you already use, install with a token
 from your own registry, and decide at the door what third-party code
 may enter your builds.
 
-> **Pre-release.** Skein is being carved out of the hosted product right
-> now. The npm registry, its pull-through proxy and admission policy,
-> people and tokens, the web UI and the REST API work today; Maven,
-> PyPI, Cargo and container images are landing next.
+> **Pre-release.** npm, Maven, PyPI, Cargo and container images publish
+> and install today, each proved in CI against its real client — `npm`,
+> `mvn`, `twine` and `pip`, `cargo`, `docker`. So do npm's pull-through
+> proxy and admission policy, people and tokens, the web UI and the REST
+> API. A pull-through proxy for the other four is not built yet.
 
 [![CI](https://github.com/weftsh/skein/actions/workflows/ci.yml/badge.svg)](https://github.com/weftsh/skein/actions/workflows/ci.yml)
 [![License: FSL-1.1-ALv2](https://img.shields.io/badge/license-FSL--1.1--ALv2-blue)](LICENSE.md)
@@ -74,6 +75,10 @@ npm install @acme/widget
 Skein username and password.
 
 - [docs/npm.md](docs/npm.md) — npm: configuration, publishing, yanking, the proxy
+- [docs/maven.md](docs/maven.md) — Maven: `settings.xml`, deploying, resolving
+- [docs/pypi.md](docs/pypi.md) — PyPI: twine uploads, pip installs, yanking
+- [docs/cargo.md](docs/cargo.md) — Cargo: the sparse index, publishing, yanking
+- [docs/containers.md](docs/containers.md) — container images: `docker login`, push and pull
 - [docs/policy.md](docs/policy.md) — the admission policy for what enters from upstream
 - [docs/operations.md](docs/operations.md) — configuration, health, the bucket, recovery
 - [docs/licensing.md](docs/licensing.md) — the licence key, seats, and exactly what the daily check sends
@@ -101,7 +106,10 @@ scripts/fetch-minio.sh                  # once
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace                  # needs PostgreSQL binaries installed
-SKEIN_REQUIRE_CLIENTS=npm cargo test -p skein-server --test clients_e2e
+# Every real client, required; SKEIN_PYTHON is a Python with twine,
+# build and setuptools (a virtualenv's `python` works).
+SKEIN_REQUIRE_CLIENTS=npm,python3,mvn,twine,pip,cargo,docker \
+  cargo test -p skein-server --test clients_e2e
 
 # The UI in a real Chromium, every page plus the licence flow:
 (cd crates/skein-server/tests/ui && npm ci && npx playwright install chromium)

@@ -28,7 +28,7 @@ const DEFAULT_LOCK_TIMEOUT_MS: u64 = 5000;
 /// processes booting against the same database must not interleave DDL.
 const MIGRATE_LOCK_KEY: i64 = 0x534B_4549_4E00_0001; // "SKEIN\0\0\x01"
 
-const MIGRATIONS: &[&str] = &[
+pub(crate) const MIGRATIONS: &[&str] = &[
     // 0001 — the registry.
     //
     // Carved out of stratum-core's control plane (its migrations 0001,
@@ -384,6 +384,16 @@ const MIGRATIONS: &[&str] = &[
         month TEXT PRIMARY KEY CHECK (month ~ '^[0-9]{4}-[0-9]{2}$'),
         peak  BIGINT NOT NULL
     );
+    "#,
+    // 0003 — an OCI tag keeps its case (`packages::version_key`). Tags
+    // stored before were keyed lowercased; they are keyed as written.
+    // No two can collide: they were distinct lowercased, so they are
+    // distinct as written.
+    r#"
+    UPDATE package_versions v SET normalized_version = v.version
+      FROM packages p
+     WHERE p.id = v.package_id AND p.ecosystem = 'oci'
+       AND v.normalized_version <> v.version;
     "#,
 ];
 

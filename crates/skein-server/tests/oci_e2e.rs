@@ -855,6 +855,52 @@ fn a_tag_moves_and_the_manifest_it_left_is_still_there() {
     assert!(server.healthy());
 }
 
+/// A tag is case-sensitive, as the distribution spec and every client
+/// say: `V1` and `v1` are two tags. Every other ecosystem's versions are
+/// matched case-insensitively here, and the OCI door inherited that, so
+/// pushing `app:V1` silently moved `app:v1` — somebody's deployment
+/// pinned to `v1` then pulled a different image.
+#[test]
+fn tags_that_differ_only_in_case_are_two_tags() {
+    let bucket = Minio::shared().bucket("oci-e2e");
+    let server = spawn(&bucket.base_url, "oci-tag-case");
+    let admin = acme(&server);
+    let repo = "acme/cased";
+    let b = v2(&server);
+    let config = push_blob(&server, repo, &admin, b"config");
+    let lower_layer = push_blob(&server, repo, &admin, b"lower");
+    let upper_layer = push_blob(&server, repo, &admin, b"UPPER");
+    let lower = manifest(&config, &[(&lower_layer, 5)]);
+    let upper = manifest(&config, &[(&upper_layer, 5)]);
+
+    for (tag, body) in [("v1", &lower), ("V1", &upper)] {
+        let r = req(
+            "PUT",
+            &format!("{b}/{repo}/manifests/{tag}"),
+            &admin,
+            Some(body),
+        );
+        assert_eq!(r.status, 201, "{tag}: {}", r.text());
+    }
+    let r = req("GET", &format!("{b}/{repo}/manifests/v1"), &admin, None);
+    assert_eq!(r.body, lower, "pushing V1 moved v1");
+    let r = req("GET", &format!("{b}/{repo}/manifests/V1"), &admin, None);
+    assert_eq!(r.body, upper);
+    let r = req("GET", &format!("{b}/{repo}/tags/list"), &admin, None);
+    let mut tags: Vec<String> = r.json()["tags"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t.as_str().unwrap().to_string())
+        .collect();
+    tags.sort();
+    assert_eq!(tags, ["V1", "v1"]);
+    // A tag nobody pushed, differing only in case, is not found.
+    let r = req("GET", &format!("{b}/{repo}/manifests/V2"), &admin, None);
+    assert_eq!(r.status, 404);
+    assert!(server.healthy());
+}
+
 /// Containers switched off answer 404 to somebody who has authenticated,
 /// for everything — the same answer as a repository that is not there.
 #[test]

@@ -157,19 +157,47 @@ pub fn forbidden(p: &Principal, need: Scope) -> Response {
     crate::api::json_error(StatusCode::FORBIDDEN, refusal_sentence(p, need))
 }
 
+/// [`require`], refusing in words that name what was attempted.
+pub fn require_to(
+    db: &ControlDb,
+    headers: &HeaderMap,
+    need: Scope,
+    challenge: Challenge,
+    what: &str,
+) -> Result<Principal, Response> {
+    let Some(p) = principal(db, headers, challenge)? else {
+        return Err(unauthorized(challenge));
+    };
+    if !p.allows(need) {
+        return Err(crate::api::json_error(
+            StatusCode::FORBIDDEN,
+            refusal_sentence_to(&p, need, what),
+        ));
+    }
+    Ok(p)
+}
+
 /// What to say to somebody who may not do this — naming which of their
 /// role and their token is the limit, because the fix differs.
 pub fn refusal_sentence(p: &Principal, need: Scope) -> String {
-    let role_allows = p
-        .role
-        .scopes()
-        .iter()
-        .any(|s| skein_control::auth::grants(*s, need));
     let what = match need {
         Scope::OrgAdmin => "administer this registry",
         Scope::PackageWrite => "publish to this registry",
         Scope::PackageRead | Scope::OrgRead => "read this registry",
     };
+    refusal_sentence_to(p, need, what)
+}
+
+/// [`refusal_sentence`], naming what was attempted. A scope covers more
+/// than one act — `package:write` is a publish *and* a yank — and a
+/// reader's `cargo yank` refused with "may not publish" sent them looking
+/// for a publish they never tried.
+pub fn refusal_sentence_to(p: &Principal, need: Scope, what: &str) -> String {
+    let role_allows = p
+        .role
+        .scopes()
+        .iter()
+        .any(|s| skein_control::auth::grants(*s, need));
     if role_allows {
         format!(
             "this token was not minted with {} and so may not {what}; mint one that is",
