@@ -215,8 +215,119 @@ fn npm_publishes_views_and_installs_through_skein() {
         "{denied}"
     );
 
+    // `npm whoami` and `npm ping`, which is what somebody runs first to
+    // check a new `.npmrc`.
+    let who = run(
+        &consumer,
+        "npm",
+        &["whoami", "--registry", &format!("{}/npm/", server.base)],
+        &cenv,
+    );
+    assert_eq!(who.trim(), "rita");
+    run(
+        &consumer,
+        "npm",
+        &["ping", "--registry", &format!("{}/npm/", server.base)],
+        &cenv,
+    );
+
+    // `npm login` with a username and password, through a terminal —
+    // npm will not read a password from anything else.
+    npm_login_through_a_terminal(&server, &admin);
+
     for d in [src, consumer, pubdir, anon] {
         let _ = std::fs::remove_dir_all(d);
     }
     assert!(server.healthy());
+}
+
+/// Drive `npm login`, `npm whoami` and `npm logout` through a
+/// pseudo-terminal, because npm's password prompt refuses a pipe. The
+/// terminal is python's `pty`; without python3 this part is a NOTE.
+fn npm_login_through_a_terminal(server: &Server, admin: &str) {
+    if !have("python3") {
+        return;
+    }
+    let (status, _) = server.req(
+        "POST",
+        "/api/v1/users",
+        admin,
+        Some(serde_json::json!({ "username": "lena", "role": "publisher", "password": "lena's long password" })),
+    );
+    assert_eq!(status, 201);
+    let home = scratch("npm-login");
+    let registry = format!("{}/npm/", server.base);
+    std::fs::write(home.join(".npmrc"), format!("registry={registry}\n")).unwrap();
+    const DRIVER: &str = r#"
+import os, pty, re, select, sys
+home, registry, user, password = sys.argv[1:5]
+env = dict(os.environ, HOME=home, npm_config_userconfig=home + "/.npmrc",
+           npm_config_update_notifier="false")
+def npm(*args, answers=()):
+    pid, fd = pty.fork()
+    if pid == 0:
+        os.execvpe("npm", ["npm", *args, "--registry", registry], env)
+    out, answers = b"", list(answers)
+    while True:
+        r, _, _ = select.select([fd], [], [], 60)
+        if not r:
+            break
+        try:
+            chunk = os.read(fd, 4096)
+        except OSError:
+            break
+        if not chunk:
+            break
+        out += chunk
+        tail = out[-40:]
+        if answers and ((len(answers) == 2 and b"Username:" in tail) or (len(answers) == 1 and b"Password:" in tail)):
+            os.write(fd, (answers.pop(0) + "\n").encode())
+    _, code = os.waitpid(pid, 0)
+    return code, out.decode(errors="replace")
+code, out = npm("login", answers=(user, password))
+print("LOGIN", code, "Logged in" in out)
+print("TOKEN", "_authToken" in open(home + "/.npmrc").read())
+code, out = npm("whoami")
+lines = [re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", l).strip() for l in out.splitlines()]
+print("WHOAMI", code, user if user in lines else repr(lines))
+code, out = npm("logout")
+print("LOGOUT", code, "_authToken" in open(home + "/.npmrc").read())
+"#;
+    let out = run(
+        &home,
+        "python3",
+        &[
+            "-c",
+            DRIVER,
+            &home.display().to_string(),
+            &registry,
+            "lena",
+            "lena's long password",
+        ],
+        &[],
+    );
+    assert!(out.contains("LOGIN 0 True"), "npm login failed:\n{out}");
+    assert!(
+        out.contains("TOKEN True"),
+        "npm did not save the token:\n{out}"
+    );
+    assert!(
+        out.contains("WHOAMI 0 lena"),
+        "npm whoami did not say lena:\n{out}"
+    );
+    assert!(
+        out.contains("LOGOUT 0 False"),
+        "npm logout left the token behind:\n{out}"
+    );
+    // …and the token it removed is revoked here, not just forgotten there.
+    let (_, tokens) = server.get("/api/v1/tokens", admin);
+    assert!(
+        !tokens["tokens"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["username"] == "lena"),
+        "npm logout left a live token: {tokens}"
+    );
+    let _ = std::fs::remove_dir_all(home);
 }

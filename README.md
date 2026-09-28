@@ -70,8 +70,12 @@ npm publish            # from a package named @acme/…
 npm install @acme/widget
 ```
 
-See [docs/operations.md](docs/operations.md) for the configuration
-reference.
+`npm login --registry=http://localhost:8080/npm/` also works, with your
+Skein username and password.
+
+- [docs/npm.md](docs/npm.md) — npm: configuration, publishing, yanking, the proxy
+- [docs/policy.md](docs/policy.md) — the admission policy for what enters from upstream
+- [docs/operations.md](docs/operations.md) — configuration, health, the bucket, recovery
 
 ## Layout
 

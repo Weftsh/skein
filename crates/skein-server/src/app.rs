@@ -160,6 +160,7 @@ pub fn router(state: SharedState) -> Router {
             "/npm/*path",
             get(npm_api::get)
                 .put(npm_api::put)
+                .delete(npm_api::delete)
                 .layer(axum::extract::DefaultBodyLimit::max(
                     npm_api::PUBLISH_BODY_LIMIT,
                 )),

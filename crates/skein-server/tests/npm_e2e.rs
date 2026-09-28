@@ -779,3 +779,126 @@ fn the_body_limit_carries_base64s_expansion() {
     assert_eq!(bytes.len(), tarball.len());
     let _ = b64(b"");
 }
+
+/// `npm login`, `npm whoami`, `npm ping` and `npm logout`, as npm sends
+/// them. Login is the one door that takes a password rather than a
+/// token; the token it mints carries the role's registry authority and
+/// never `org:admin`, and logout revokes only the token that asks.
+#[test]
+fn npm_login_whoami_ping_and_logout_speak_npms_own_endpoints() {
+    let bucket = Minio::shared().bucket("npm-e2e");
+    let server = spawn(&bucket.base_url, "npm-login");
+    let admin = server.bootstrap("acme");
+    let (status, _) = server.req(
+        "POST",
+        "/api/v1/users",
+        &admin,
+        Some(serde_json::json!({ "username": "rita", "role": "reader", "password": "rita's long password" })),
+    );
+    assert_eq!(status, 201);
+
+    // npm tries web login first, and falls back on any 4xx.
+    let r = server.raw(
+        "POST",
+        "/npm/-/v1/login",
+        &[("Content-Type", "application/json")],
+        Some(b"{}"),
+    );
+    assert!(
+        (400..500).contains(&r.status),
+        "web login must be declined: {}",
+        r.status
+    );
+
+    let login = |user: &str, name: &str, password: &str| {
+        server.raw(
+            "PUT",
+            &format!("/npm/-/user/org.couchdb.user:{user}"),
+            &[("Content-Type", "application/json")],
+            Some(
+                serde_json::json!({ "_id": format!("org.couchdb.user:{name}"), "name": name, "password": password, "type": "user" })
+                    .to_string()
+                    .as_bytes(),
+            ),
+        )
+    };
+    for (user, name, pw, want) in [
+        ("rita", "rita", "the wrong password!!", 401),
+        ("nobody", "nobody", "rita's long password", 401),
+        ("rita", "admin", "rita's long password", 400),
+    ] {
+        let r = login(user, name, pw);
+        assert_eq!(r.status, want, "{user}/{name}: {}", r.text());
+    }
+    let r = login("rita", "rita", "rita's long password");
+    assert_eq!(r.status, 201, "{}", r.text());
+    assert_eq!(r.json()["ok"], true);
+    let rita = r.json()["token"].as_str().expect("a token").to_string();
+
+    let (status, who) = server.get("/npm/-/whoami", &rita);
+    assert_eq!(status, 200);
+    assert_eq!(who["username"], "rita");
+    assert_eq!(server.get("/npm/-/ping", &rita).0, 200);
+    let (_, me) = server.get("/api/v1/me", &rita);
+    assert_eq!(
+        me["scopes"],
+        serde_json::json!(["package:read"]),
+        "a reader's npm token installs"
+    );
+
+    // An admin's npm token publishes and does not administer.
+    let (_, boot) = server.get("/api/v1/me", &admin);
+    assert_eq!(boot["username"], "admin");
+    let pw = server
+        .admin(&["admin", "reset-password", "admin"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let r = login("admin", "admin", &pw);
+    assert_eq!(r.status, 201, "{}", r.text());
+    let npm_admin = r.json()["token"].as_str().unwrap().to_string();
+    let (_, me) = server.get("/api/v1/me", &npm_admin);
+    assert_eq!(
+        me["scopes"],
+        serde_json::json!(["package:read", "package:write"]),
+        "{me}"
+    );
+    assert_eq!(server.get("/api/v1/users", &npm_admin).0, 403);
+
+    // Logout revokes the token that asks, and only it.
+    let r = server.raw(
+        "DELETE",
+        &format!("/npm/-/user/token/{npm_admin}"),
+        &[("Authorization", &format!("Bearer {rita}"))],
+        None,
+    );
+    assert_eq!(r.status, 404, "one person's logout revoked another's token");
+    assert_eq!(server.get("/npm/-/whoami", &npm_admin).0, 200);
+    let r = server.raw(
+        "DELETE",
+        &format!("/npm/-/user/token/{rita}"),
+        &[("Authorization", &format!("Bearer {rita}"))],
+        None,
+    );
+    assert_eq!(r.status, 200, "{}", r.text());
+    assert_eq!(server.get("/npm/-/whoami", &rita).0, 401);
+    let r = server.raw(
+        "DELETE",
+        "/npm/widget",
+        &[("Authorization", &format!("Bearer {npm_admin}"))],
+        None,
+    );
+    assert_eq!(
+        r.status, 405,
+        "npm unpublish is not how a package is removed here"
+    );
+
+    // With npm switched off there is nothing to log in to.
+    let off = serde_json::json!({ "ecosystem": "npm", "mode": "off" });
+    assert_eq!(
+        server.req("PUT", "/api/v1/ecosystems", &admin, Some(off)).0,
+        200
+    );
+    assert_eq!(login("admin", "admin", &pw).status, 404);
+    assert!(server.healthy());
+}

@@ -113,10 +113,21 @@ pub async fn get(
     Path(path): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    let org = match open(&state, &headers, Scope::PackageRead) {
-        Ok((o, _)) => o,
+    let (org, principal) = match open(&state, &headers, Scope::PackageRead) {
+        Ok(x) => x,
         Err(r) => return r,
     };
+    // npm's own endpoints live under `-/`, a prefix no package name can
+    // have. `npm whoami` and `npm ping` are what somebody runs first to
+    // check a new `.npmrc`, and answering them as "no such package"
+    // sends that person looking for a problem in the wrong place.
+    match path.trim_matches('/') {
+        "-/whoami" => {
+            return Json(serde_json::json!({ "username": principal.username })).into_response()
+        }
+        "-/ping" => return Json(serde_json::json!({})).into_response(),
+        _ => {}
+    }
     // The base a *packument's* tarball URLs are built from is the one
     // this client reached us on — see `registry_door::self_base`.
     let base = registry_door::self_base(&state, &headers);
@@ -311,13 +322,126 @@ async fn tarball(state: SharedState, org: Org, name: String, filename: String) -
     }
 }
 
-/// `PUT /npm/*path` — publish one version.
+/// The prefix `npm login` PUTs a username and password to, once the
+/// registry has declined its web login (any 4xx on `POST /-/v1/login`).
+const COUCH_USER: &str = "-/user/org.couchdb.user:";
+
+/// `npm login`: a username and password, exchanged for a token.
+///
+/// The one door here that takes a password rather than a token, and so
+/// the one that answers before `open` — the person has no token yet;
+/// that is why they are here. It is `users::authenticate`, the same
+/// check the UI's sign-in makes, and fails the same way for every reason
+/// so it cannot be used to discover who has an account.
+///
+/// The token is scoped to the role's *registry* authority — install for
+/// a reader, publish for a publisher or an admin — never `org:admin`. A
+/// credential written into a file by a package manager is the one most
+/// likely to be copied somewhere it should not be, and it has no use for
+/// administering the registry.
+async fn couch_login(state: SharedState, url_user: String, body: Bytes) -> Response {
+    match packages::ecosystem_policy(&state.db, &state.org().id, Ecosystem::Npm) {
+        Ok(p) if p.enabled() => {}
+        Ok(_) => return npm_error(StatusCode::NOT_FOUND, "npm is not switched on here"),
+        Err(e) => return internal(e),
+    }
+    let doc: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+    let (Some(name), Some(password)) = (doc["name"].as_str(), doc["password"].as_str()) else {
+        return npm_error(
+            StatusCode::BAD_REQUEST,
+            "a login needs a name and a password",
+        );
+    };
+    // The name in the URL is the one npm prompted for; the body must
+    // agree, or the token would be minted for somebody else.
+    if !name.eq_ignore_ascii_case(&url_user) {
+        return npm_error(
+            StatusCode::BAD_REQUEST,
+            "the name in the URL and the body differ",
+        );
+    }
+    let user = match skein_control::users::authenticate(&state.db, name, password) {
+        Ok(Some(u)) => u,
+        Ok(None) => return npm_error(StatusCode::UNAUTHORIZED, "invalid username or password"),
+        Err(e) => return internal(e),
+    };
+    let scope = if user.role == skein_control::users::Role::Reader {
+        Scope::PackageRead
+    } else {
+        Scope::PackageWrite
+    };
+    let (info, token) =
+        match skein_control::auth::mint(&state.db, &user, "npm login", &[scope], None) {
+            Ok(x) => x,
+            Err(e) => return internal(e),
+        };
+    crate::api::audit(
+        &state,
+        &Principal::for_user(&user),
+        "token.create",
+        serde_json::json!({ "token": info.id, "owner": user.username, "label": info.label, "scopes": [scope.as_str()] }),
+    );
+    (
+        StatusCode::CREATED,
+        Json(serde_json::json!({
+            "ok": true,
+            "id": format!("org.couchdb.user:{}", user.username),
+            "token": token,
+        })),
+    )
+        .into_response()
+}
+
+/// `DELETE /npm/-/user/token/<token>` — `npm logout`: revoke the token
+/// this request carries. Only that one — naming somebody else's token in
+/// the URL revokes nothing.
+pub async fn delete(
+    State(state): State<SharedState>,
+    Path(path): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let (_, principal) = match open(&state, &headers, Scope::PackageRead) {
+        Ok(x) => x,
+        Err(r) => return r,
+    };
+    let Some(named) = path.trim_matches('/').strip_prefix("-/user/token/") else {
+        return npm_error(
+            StatusCode::METHOD_NOT_ALLOWED,
+            "a package is removed from the Skein UI or API, not with npm",
+        );
+    };
+    let presented = crate::authx::token_from_headers(&headers).unwrap_or_default();
+    let (Some(id), true) = (principal.token_id.as_deref(), named == presented) else {
+        return npm_error(
+            StatusCode::NOT_FOUND,
+            "that is not the token this request carries",
+        );
+    };
+    match skein_control::auth::revoke(&state.db, id) {
+        Ok(_) => {
+            crate::api::audit(
+                &state,
+                &principal,
+                "token.revoke",
+                serde_json::json!({ "token": id, "via": "npm logout" }),
+            );
+            Json(serde_json::json!({ "ok": true })).into_response()
+        }
+        Err(e) => internal(e),
+    }
+}
+
+/// `PUT /npm/*path` — publish one version, or `npm login`.
 pub async fn put(
     State(state): State<SharedState>,
     Path(path): Path<String>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
+    if let Some(user) = path.trim_matches('/').strip_prefix(COUCH_USER) {
+        let user = npm::decode_name(user);
+        return couch_login(state, user, body).await;
+    }
     let (org, principal) = match open(&state, &headers, Scope::PackageWrite) {
         Ok(x) => x,
         Err(r) => return r,
