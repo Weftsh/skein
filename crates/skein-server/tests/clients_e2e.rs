@@ -292,6 +292,17 @@ lines = [re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", l).strip() for l in out.splitline
 print("WHOAMI", code, user if user in lines else repr(lines))
 code, out = npm("logout")
 print("LOGOUT", code, "_authToken" in open(home + "/.npmrc").read())
+# Five wrong passwords lock the name, and then the right one is refused,
+# in words. npm retries a refused PUT by itself (fetch-retries: 10s, then
+# 60s, by default); the waits are shortened here, not switched off, so
+# the retries still happen and are refused like the first try.
+wrong = [npm("login", answers=(user, "not " + password)) for _ in range(5)]
+print("WRONG", [c != 0 and "invalid username or password" in o for c, o in wrong])
+env.update(npm_config_fetch_retry_mintimeout="100", npm_config_fetch_retry_maxtimeout="200")
+code, out = npm("login", answers=(user, password))
+flat = " ".join(re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", out).split())
+said = re.search(r"too many failed sign-ins for \S+; try again in \d+ seconds", flat)
+print("LOCKED", code != 0, "429" in flat, said.group(0) if said else repr(flat[-800:]))
 "#;
     let out = run(
         &home,
@@ -319,7 +330,16 @@ print("LOGOUT", code, "_authToken" in open(home + "/.npmrc").read())
         out.contains("LOGOUT 0 False"),
         "npm logout left the token behind:\n{out}"
     );
-    // …and the token it removed is revoked here, not just forgotten there.
+    assert!(
+        out.contains("WRONG [True, True, True, True, True]"),
+        "npm login with a wrong password:\n{out}"
+    );
+    assert!(
+        out.contains("LOCKED True True too many failed sign-ins for lena; try again in "),
+        "a locked npm login did not say why:\n{out}"
+    );
+    // …and the token it removed is revoked here, not just forgotten there,
+    // and the refused login minted none.
     let (_, tokens) = server.get("/api/v1/tokens", admin);
     assert!(
         !tokens["tokens"]

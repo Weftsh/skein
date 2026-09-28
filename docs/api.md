@@ -45,6 +45,21 @@ A token's scopes are narrowed on every request by its owner's role:
 | `POST /api/v1/me/tokens` | `{"label", "scopes": [...], "expires_in_days"?}` → the token, **once** |
 | `DELETE /api/v1/tokens/:id` | revoke one of yours (an admin may revoke anybody's) |
 
+A wrong password is a **401** (`invalid username or password`) for
+every reason — unknown name, wrong password, disabled account — and a
+wrong `current` password is a **403**.
+
+**Sign-in protection.** `POST /api/v1/session`, `PUT
+/api/v1/me/password` and `npm login` share failure counters: by default
+5 failures for one username, or 20 from one address, within 15 minutes
+lock it for 15 minutes. A locked username or address is answered
+**429 Too Many Requests** with `Retry-After: <seconds>` and
+`{"error": "too many failed sign-ins for ada; try again in 840 seconds"}`
+(`from <address>` for an address), before the password is checked — the
+right one included. Refused attempts do not count. Tokens are never
+throttled. The limits, and how the address is found behind a proxy, are
+in [operations.md](operations.md#sign-in-protection).
+
 ## Packages
 
 | | |

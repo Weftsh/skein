@@ -38,6 +38,9 @@ pub struct AppState {
     pub instance: Option<String>,
     /// The commercial licence: warnings only, never a refusal.
     pub license: crate::license::Licensing,
+    /// Failed password checks, counted per name and per address, shared
+    /// by every door that takes a password. See [`crate::throttle`].
+    pub sign_ins: crate::throttle::Throttle,
     org: OnceLock<Org>,
 }
 
@@ -49,6 +52,7 @@ impl AppState {
         store_url: String,
         public_url: String,
         license: crate::license::Licensing,
+        sign_ins: crate::throttle::Throttle,
     ) -> AppState {
         AppState {
             db,
@@ -56,6 +60,7 @@ impl AppState {
             public_url,
             instance: std::env::var("SKEIN_INSTANCE_ID").ok(),
             license,
+            sign_ins,
             org: OnceLock::new(),
         }
     }
@@ -395,10 +400,15 @@ pub async fn serve(state: SharedState, bind: &str) -> Result<(), String> {
     eprintln!("skein: serving on {bind} (public URL {})", state.public_url);
     crate::gc::spawn(state.clone());
     crate::license::spawn(state.clone());
-    axum::serve(listener, router(state))
-        .with_graceful_shutdown(shutdown())
-        .await
-        .map_err(|e| format!("serve: {e}"))
+    // With the peer's address: the sign-in throttle counts failures
+    // against it (see `throttle::Policy::client_address`).
+    axum::serve(
+        listener,
+        router(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown())
+    .await
+    .map_err(|e| format!("serve: {e}"))
 }
 
 async fn shutdown() {

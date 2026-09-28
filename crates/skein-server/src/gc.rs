@@ -206,6 +206,7 @@ mod tests {
             bucket.base_url.clone(),
             "http://127.0.0.1".into(),
             crate::license::Licensing::from_env().expect("licensing"),
+            crate::throttle::Throttle::new(crate::throttle::Policy::from_env().expect("policy")),
         );
         let prefix = org.package_prefix();
 
@@ -272,6 +273,7 @@ mod tests {
             bucket.base_url.clone(),
             "http://127.0.0.1".into(),
             crate::license::Licensing::from_env().expect("licensing"),
+            crate::throttle::Throttle::new(crate::throttle::Policy::from_env().expect("policy")),
         ));
         let prefix = org.package_prefix();
         let store = ObjectStore::new(&state.store_url);

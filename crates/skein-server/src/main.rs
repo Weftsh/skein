@@ -25,6 +25,7 @@ mod authx;
 mod gc;
 mod license;
 mod registry;
+mod throttle;
 mod ui;
 
 use clap::{Parser, Subcommand};
@@ -182,11 +183,13 @@ fn state() -> Result<app::SharedState, String> {
         .unwrap_or_else(|| "http://localhost:8080".to_string());
     let license = license::Licensing::from_env()?;
     license.init(&db)?;
+    let sign_ins = throttle::Throttle::new(throttle::Policy::from_env()?);
     Ok(Arc::new(app::AppState::new(
         db,
         store_url.trim_end_matches('/').to_string(),
         public_url.trim_end_matches('/').to_string(),
         license,
+        sign_ins,
     )))
 }
 

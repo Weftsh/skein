@@ -77,6 +77,14 @@ Everything is the environment.
 | `SSL_CERT_FILE`, `SSL_CERT_DIR` | the OS's | Where the operating system's trust store is read from, as OpenSSL reads them. |
 | `AWS_DEFAULT_REGION` | — | Read when `AWS_REGION` is not set. |
 | `SKEIN_UPSTREAM_<ECOSYSTEM>` | — | An ecosystem's pull-through upstream. Only npm has a proxy today, so only `SKEIN_UPSTREAM_NPM` does anything. |
+| `SKEIN_LOGIN_MAX_FAILURES` | `5` | Failed password checks for one username, within the window, that lock it. See [Sign-in protection](#sign-in-protection). |
+| `SKEIN_LOGIN_MAX_FAILURES_PER_ADDRESS` | `20` | Failed password checks from one client address, within the window, that lock it. |
+| `SKEIN_LOGIN_WINDOW_SECS` | `900` | How long failures are remembered, and how long a lock lasts. At most `86400`. |
+| `SKEIN_TRUST_PROXY_HEADERS` | `false` | Take the client's address from the right-most `X-Forwarded-For` entry — the one your proxy appended — instead of the TCP peer. Set it only when every request reaches Skein through that proxy. |
+
+A limit that does not parse — `0`, a word, a window over a day —
+refuses to start and names the variable, rather than running without
+the limit somebody meant to set.
 
 For development and tests only — never set these in production:
 
@@ -152,6 +160,11 @@ whatever you run, it needs:
 - Container images need Skein at the **root** of its own host name: a
   container client has nowhere to put a base path. See
   [containers.md](containers.md).
+- **`SKEIN_TRUST_PROXY_HEADERS=true`**, when every request reaches Skein
+  through the proxy: otherwise every sign-in arrives from the proxy's
+  address, and twenty failures from anybody lock sign-in for everybody.
+  See [Sign-in protection](#sign-in-protection). `compose.tls.yml` sets
+  it.
 
 ## Several replicas
 
@@ -159,7 +172,9 @@ Run as many `skein` processes as you like against one database and one
 bucket, behind a load balancer; no stickiness is needed. Sessions,
 tokens, upload sessions (a `docker push` whose requests land on
 different replicas) and the licence check all live in the database; the
-collector's deletes are re-checked, so every replica may run it.
+collector's deletes are re-checked, so every replica may run it. Only
+the sign-in counters are per process — see
+[Sign-in protection](#sign-in-protection).
 
 ## Sizing
 
@@ -287,6 +302,64 @@ taken before the upgrade.
 | `mint-token <name> --scope <scope> [--label …]` | a token, printed once |
 | `gc [--grace-secs N]` | collect unreferenced bytes now |
 | `license status\|install\|check\|keys` | the licence — see [licensing.md](licensing.md) |
+
+## Sign-in protection
+
+Three things check a password: signing in to the UI (`POST
+/api/v1/session`), `npm login`, and changing your own password. Every
+check is an Argon2 hash, and all three share one set of counters, so a
+guesser gains nothing by moving between them.
+
+- **5 failures for one username**, within 15 minutes of the first of
+  them, lock that username; **20 from one address** lock that address.
+  A lock lasts 15 minutes from the failure that filled it. All three
+  numbers are settings — see the table above.
+- While a username or address is locked, every password check for it is
+  answered **429** with `Retry-After` and a sentence — `too many failed
+  sign-ins for ada; try again in 840 seconds` — **before** the password
+  is looked at. The right password is refused too; that is the point.
+- A username nobody holds is counted and locked exactly like one
+  somebody does, and answers in the same words, so a lock says nothing
+  about who has an account. The username is read the way sign-in reads
+  it: `ADA` and `ada` are one counter.
+- A refused attempt is not a failure: it neither counts nor stretches
+  the lock. A successful sign-in clears its username's counter, but not
+  its address's — or one valid account would reset the count for
+  somebody trying one password against everybody else's.
+- **Tokens are not touched.** API tokens, the `.npmrc`, CI and every
+  package manager keep working while a person's sign-in is locked.
+  Anybody can keep somebody's sign-in locked by failing five times every
+  fifteen minutes; that person's tokens still work, and the lock ends on
+  its own. `skein admin reset-password` does not end it — the counters
+  live in the server process — but restarting the server does.
+- The first failure that locks a username or an address writes one
+  `session.throttled` entry to the audit log, by `system:sign-in`,
+  naming the username or the address, how many failures, and which of
+  the three doors it was. One per lock, not one per refused guess.
+
+The address is the TCP peer's. An IPv6 address counts as its `/64`,
+because a single host is routinely handed a whole `/64`. Behind a
+reverse proxy the peer is the proxy, for everybody, so set
+`SKEIN_TRUST_PROXY_HEADERS=true`: the address is then the **right-most**
+`X-Forwarded-For` entry, the one the proxy appended, and anything to its
+left — which the client wrote — is ignored. A request with no entry
+there is counted against the peer. Set it only when every request
+reaches Skein through that proxy, and that proxy writes the address it
+received the request from **last** — as nginx does with
+`$proxy_add_x_forwarded_for`. Without the setting, a client can write
+any `X-Forwarded-For` it likes and Skein ignores it.
+
+Skein trusts exactly one hop, so check what yours writes. Behind two
+proxies, or a load balancer that appends its own address after the
+client's (Google Cloud's does), the right-most entry is a proxy's, and
+every sign-in is counted against that one address; have the proxy
+nearest Skein set the header to the address it received instead.
+
+The counters live in each `skein` process. Several replicas behind a
+load balancer each keep their own, which still bounds guessing to
+replicas × the limit; a restart forgets them. A process holds at most
+100,000 of them: when full it drops what has expired, then the oldest
+that is not locked.
 
 ## Collecting unreferenced bytes
 

@@ -10,6 +10,11 @@
 services:
   skein:
     ports: !reset []
+    environment:
+      # Only nginx reaches Skein now, and nginx appends the client's
+      # address to X-Forwarded-For: take it from there, or every sign-in
+      # counts against nginx's one address.
+      SKEIN_TRUST_PROXY_HEADERS: "true"
 
   nginx:
     image: nginx:1.27

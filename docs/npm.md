@@ -30,6 +30,13 @@ it into your `.npmrc`. The token can install, and publish if your role
 allows it; it never carries `org:admin`, whatever your role. `npm
 logout` revokes it on the server, not just in the file.
 
+A wrong password counts towards the same lock as signing in to the UI —
+see [Sign-in protection](operations.md#sign-in-protection). A locked
+`npm login` fails with `429 Too Many Requests` and says how long to
+wait, but only after npm has retried twice on its own, 10 and then 60
+seconds apart (`fetch-retries`); the retries are refused like the first
+try and do not count.
+
 ```sh
 npm whoami --registry=https://skein.example.com/npm/   # who the token is
 npm ping   --registry=https://skein.example.com/npm/   # is the registry there
