@@ -11,7 +11,7 @@
 //! the store prefix, and ids do not change.
 
 use crate::api::{
-    license_api, maven_api, npm_api, packages_api, people_api, pypi_api, registry_door,
+    cargo_api, license_api, maven_api, npm_api, packages_api, people_api, pypi_api, registry_door,
 };
 use axum::extract::{Request, State};
 use axum::http::{header, HeaderValue, Method, StatusCode};
@@ -97,7 +97,10 @@ impl AppState {
 /// here would answer 404 for everything, which reads as a broken
 /// registry rather than a missing feature.
 pub fn served(eco: Ecosystem) -> bool {
-    matches!(eco, Ecosystem::Npm | Ecosystem::Maven | Ecosystem::Pypi)
+    matches!(
+        eco,
+        Ecosystem::Npm | Ecosystem::Maven | Ecosystem::Pypi | Ecosystem::Cargo
+    )
 }
 
 pub fn router(state: SharedState) -> Router {
@@ -206,6 +209,32 @@ pub fn router(state: SharedState) -> Router {
             )),
         )
         .route("/pypi/*path", get(pypi_api::get))
+        // Cargo. The sparse index is one wildcard; the three API calls
+        // are their own routes because `cargo publish` PUTs and `cargo
+        // yank` DELETEs at fixed paths, and a wildcard that swallowed
+        // them would have to re-parse a method the router already knows.
+        // The publish carries the whole `.crate` in one framed body, so
+        // it has its own limit — axum's 2 MiB default would refuse an
+        // ordinary crate before any of our own checks ran.
+        .route(
+            "/cargo/api/v1/crates/new",
+            put(cargo_api::publish).layer(axum::extract::DefaultBodyLimit::max(
+                cargo_api::PUBLISH_BODY_LIMIT,
+            )),
+        )
+        // `…/:name/:version/:verb` carries three verbs on one shape —
+        // `download`, `yank` and `unyank` — so all three methods hang
+        // off one route. Registering the download under the wildcard
+        // below instead would never be reached: a router prefers the
+        // more specific path and answers 405, which reads as "cargo is
+        // sending the wrong method" rather than as a routing mistake.
+        .route(
+            "/cargo/api/v1/crates/:name/:version/:verb",
+            get(cargo_api::download)
+                .delete(cargo_api::yank)
+                .put(cargo_api::yank),
+        )
+        .route("/cargo/*path", get(cargo_api::get))
         .nest("/api/v1", api)
         .layer(middleware::from_fn_with_state(state.clone(), setup_layer))
         .layer(middleware::from_fn(csrf_layer))

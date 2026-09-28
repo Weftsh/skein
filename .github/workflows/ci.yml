@@ -97,7 +97,7 @@ jobs:
       # exists to prove each contract against the real thing.
       - name: Real clients against a real server
         env:
-          SKEIN_REQUIRE_CLIENTS: npm,python3,mvn,twine,pip
+          SKEIN_REQUIRE_CLIENTS: npm,python3,mvn,twine,pip,cargo
           SKEIN_PYTHON: python
         run: cargo test -p skein-server --test clients_e2e -- --nocapture
 

@@ -8,6 +8,7 @@
 //! - `npm` — the npm registry protocol, translated to the control plane.
 //! - `maven` — Maven's repository layout and its one generated document.
 //! - `pypi` — PyPI's simple index and twine's multipart upload.
+//! - `cargo` — Cargo's sparse index and its framed publish body.
 //! - `spdx`, `policy` — the admission policy: what may enter from an
 //!   upstream registry, decided per version.
 //! - `upstream` — fetching from a public registry, and the rules that
@@ -30,6 +31,7 @@
 //! would then have to write a plugin against.
 
 pub mod blobs;
+pub mod cargo;
 pub mod maven;
 pub mod npm;
 pub mod policy;
