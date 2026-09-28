@@ -6,6 +6,7 @@
 //!
 //! - `blobs` — bytes in the object store, content-addressed and verified.
 //! - `npm` — the npm registry protocol, translated to the control plane.
+//! - `pypi` — PyPI's simple index and twine's multipart upload.
 //! - `spdx`, `policy` — the admission policy: what may enter from an
 //!   upstream registry, decided per version.
 //! - `upstream` — fetching from a public registry, and the rules that
@@ -30,5 +31,6 @@
 pub mod blobs;
 pub mod npm;
 pub mod policy;
+pub mod pypi;
 pub mod spdx;
 pub mod upstream;

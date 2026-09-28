@@ -253,6 +253,7 @@ pub async fn read_artifact(state: &SharedState, digest: &str) -> Result<Option<V
 /// the container API at the host root?
 fn is_registry_path(path: &str) -> bool {
     path == "/v2"
+        || path == "/pypi"
         || ["/v2/", "/npm/", "/maven/", "/pypi/", "/cargo/"]
             .iter()
             .any(|p| path.starts_with(p))
@@ -348,6 +349,7 @@ mod tests {
             "/npm/x",
             "/maven/a",
             "/pypi/simple/",
+            "/pypi",
             "/cargo/index/config.json",
         ] {
             assert!(is_registry_path(p), "{p}");

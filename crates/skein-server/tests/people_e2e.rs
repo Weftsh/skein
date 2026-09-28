@@ -59,7 +59,12 @@ fn an_install_says_how_to_set_it_up_and_is_ready_once_it_is() {
     let r = server.raw("GET", "/readyz", &[], None);
     assert_eq!(r.status, 503);
     assert!(r.text().contains("skein admin bootstrap"), "{}", r.text());
-    for path in ["/api/v1/me", "/npm/widget", "/api/v1/packages"] {
+    for path in [
+        "/api/v1/me",
+        "/npm/widget",
+        "/pypi/simple/widget/",
+        "/api/v1/packages",
+    ] {
         let r = server.raw("GET", path, &[], None);
         assert_eq!(r.status, 503, "{path}");
         assert!(
@@ -73,12 +78,40 @@ fn an_install_says_how_to_set_it_up_and_is_ready_once_it_is() {
     let boot = bootstrap_json(&server, &[]);
     assert_eq!(boot["org"], "acme");
     assert_eq!(boot["username"], "admin");
-    assert_eq!(boot["ecosystems"], serde_json::json!(["npm"]));
     let password = boot["password"].as_str().expect("a generated password");
     assert!(password.len() >= 20, "{password}");
 
     assert_eq!(server.raw("GET", "/readyz", &[], None).status, 200);
     let token = boot["token"].as_str().unwrap();
+
+    // The bootstrap switched on exactly what this build serves, in
+    // private mode, and said so.
+    let (status, overview) = server.get("/api/v1/overview", token);
+    assert_eq!(status, 200, "{overview}");
+    let ecos = overview["ecosystems"].as_array().expect("a list");
+    let served: Vec<&serde_json::Value> = ecos
+        .iter()
+        .filter(|e| e["served"] == true)
+        .map(|e| &e["ecosystem"])
+        .collect();
+    assert_eq!(
+        boot["ecosystems"]
+            .as_array()
+            .expect("a list")
+            .iter()
+            .collect::<Vec<_>>(),
+        served,
+        "{boot} {overview}"
+    );
+    assert!(served.contains(&&serde_json::json!("npm")), "{overview}");
+    for e in ecos {
+        let want = if e["served"] == true {
+            "private"
+        } else {
+            "off"
+        };
+        assert_eq!(e["mode"], want, "{e}");
+    }
     let (status, me) = server.get("/api/v1/me", token);
     assert_eq!(status, 200, "{me}");
     assert_eq!(me["username"], "admin");

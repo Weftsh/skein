@@ -14,6 +14,10 @@ path = "src/main.rs"
 skein-store.workspace = true
 skein-control.workspace = true
 axum = "0.7"
+# For `hyper::ext::ReasonPhrase` alone: twine and pip show a person the
+# reason phrase of a refusal, not its body. axum already builds hyper
+# with `http1`; this only names the type.
+hyper = { version = "1", features = ["http1"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "time", "sync"] }
 bytes = "1"
 futures-util = { version = "0.3", default-features = false }
