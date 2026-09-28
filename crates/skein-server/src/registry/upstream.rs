@@ -254,6 +254,76 @@ impl GlobalEnough for IpAddr {
     }
 }
 
+/// How a GET to the upstream went wrong.
+enum Got {
+    Status(u16),
+    Failed(String),
+}
+
+/// One agent for every upstream: the trust store every connection Skein
+/// makes shares (so an internal mirror under the operator's own CA is
+/// reachable through `SKEIN_CA_FILE`), and no redirect followed on its
+/// own — [`Http::get`] follows them, and checks each one.
+fn agent() -> &'static ureq::Agent {
+    static AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
+    AGENT.get_or_init(|| skein_tls::agent().redirects(0).build())
+}
+
+/// Where a `Location` points, from the URL that answered with it.
+fn resolve(from: &str, location: &str) -> Option<String> {
+    if location.starts_with("https://") || location.starts_with("http://") {
+        return Some(location.to_string());
+    }
+    let (scheme, rest) = from.split_once("://")?;
+    let authority = rest.split('/').next()?;
+    if let Some(path) = location.strip_prefix('/') {
+        return Some(format!("{scheme}://{authority}/{path}"));
+    }
+    let dir = from.rsplit_once('/').map(|(d, _)| d)?;
+    Some(format!("{dir}/{location}"))
+}
+
+impl Http {
+    /// A GET that follows at most five redirects, **each of them on the
+    /// configured upstream**.
+    ///
+    /// The agent used to be ureq's default, which follows redirects by
+    /// itself — so the check that a tarball URL names the configured
+    /// registry held for the first hop only, and a redirect could send
+    /// Skein anywhere: to another host, or to an address inside the
+    /// network the SSRF guard exists to keep it out of. A mirror that
+    /// hands downloads to a different host (a CDN, presigned object
+    /// storage) is refused with a sentence saying so; point
+    /// `SKEIN_UPSTREAM_NPM` at the host that serves the bytes.
+    fn get(&self, url: &str, base: &(String, String, u16)) -> Result<ureq::Response, Got> {
+        let mut url = url.to_string();
+        for _ in 0..=5 {
+            if origin_of(&url).as_ref() != Some(base) {
+                return Err(Got::Failed(format!(
+                    "the upstream redirected to {url}, which is not the configured upstream \
+                     registry ({}://{}:{})",
+                    base.0, base.1, base.2
+                )));
+            }
+            let resp = match agent().get(&url).timeout(self.timeout).call() {
+                Ok(r) => r,
+                Err(ureq::Error::Status(code, _)) => return Err(Got::Status(code)),
+                Err(e) => return Err(Got::Failed(skein_tls::hint(&e.to_string()))),
+            };
+            if !(300..400).contains(&resp.status()) {
+                return Ok(resp);
+            }
+            let Some(next) = resp.header("location").and_then(|l| resolve(&url, l)) else {
+                return Err(Got::Status(resp.status()));
+            };
+            url = next;
+        }
+        Err(Got::Failed(
+            "the upstream redirected more than five times".into(),
+        ))
+    }
+}
+
 impl Upstream for Http {
     fn metadata(&self, name: &str) -> Result<Option<Vec<u8>>, String> {
         // Checked here rather than at construction: this is the moment a
@@ -263,17 +333,19 @@ impl Upstream for Http {
         // The name is already normalised and validated by
         // `packages::normalize_name`; percent-encode the scope's slash
         // because that is how every npm client addresses one.
+        let base = check_base(&self.base, self.allow_private)?;
         let path = name.replace('/', "%2f");
         let url = format!("{}/{path}", self.base);
-        match ureq::get(&url).timeout(self.timeout).call() {
+        match self.get(&url, &base) {
             Ok(resp) => {
                 let mut out = Vec::new();
                 std::io::Read::read_to_end(&mut resp.into_reader(), &mut out)
                     .map_err(|e| format!("upstream {url}: {e}"))?;
                 Ok(Some(out))
             }
-            Err(ureq::Error::Status(404, _)) => Ok(None),
-            Err(e) => Err(format!("upstream {url}: {e}")),
+            Err(Got::Status(404)) => Ok(None),
+            Err(Got::Status(code)) => Err(format!("upstream {url}: HTTP {code}")),
+            Err(Got::Failed(e)) => Err(format!("upstream {url}: {e}")),
         }
     }
 
@@ -292,10 +364,10 @@ impl Upstream for Http {
                 base.0, base.1, base.2
             ));
         }
-        let resp = ureq::get(url)
-            .timeout(self.timeout)
-            .call()
-            .map_err(|e| format!("upstream {url}: {e}"))?;
+        let resp = self.get(url, &base).map_err(|e| match e {
+            Got::Status(code) => format!("upstream {url}: HTTP {code}"),
+            Got::Failed(e) => format!("upstream {url}: {e}"),
+        })?;
         let mut out = Vec::new();
         std::io::Read::read_to_end(&mut resp.into_reader(), &mut out)
             .map_err(|e| format!("upstream {url}: {e}"))?;
@@ -412,6 +484,86 @@ mod tests {
         ] {
             assert!(up.fetch(elsewhere).is_err(), "{elsewhere} was fetched");
         }
+    }
+
+    /// A loopback HTTP server answering each path with a fixed response,
+    /// counting what it was asked. Enough to be an upstream that
+    /// redirects.
+    fn answering(
+        routes: Vec<(&'static str, String)>,
+    ) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = hits.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let mut line = String::new();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let _ = reader.read_line(&mut line);
+                loop {
+                    let mut h = String::new();
+                    if reader.read_line(&mut h).unwrap_or(0) == 0 || h.trim().is_empty() {
+                        break;
+                    }
+                }
+                let path = line.split_whitespace().nth(1).unwrap_or("").to_string();
+                let reply = routes
+                    .iter()
+                    .find(|(p, _)| *p == path)
+                    .map(|(_, r)| r.clone())
+                    .unwrap_or_else(|| "HTTP/1.1 404 No\r\ncontent-length: 0\r\n\r\n".into());
+                let _ = stream.write_all(reply.as_bytes());
+            }
+        });
+        (base, hits)
+    }
+
+    /// A redirect is checked like the URL it came from: followed while
+    /// it stays on the configured upstream, refused the moment it
+    /// leaves. ureq's default agent used to follow redirects by itself,
+    /// so the origin check above held for the first hop only.
+    #[test]
+    fn a_redirect_is_followed_only_while_it_stays_on_the_upstream() {
+        let (elsewhere, elsewhere_hits) =
+            answering(vec![("/x.tgz", ok_with("somebody else's bytes"))]);
+        let (base, _) = answering(vec![
+            ("/moved.tgz", redirect("/real.tgz")),
+            ("/real.tgz", ok_with("the upstream's bytes")),
+            ("/away.tgz", redirect(&format!("{elsewhere}/x.tgz"))),
+            ("/loop.tgz", redirect("/loop.tgz")),
+        ]);
+        let up = Http::new(&base).allowing_private(true);
+        assert_eq!(
+            up.fetch(&format!("{base}/moved.tgz")).unwrap(),
+            b"the upstream's bytes"
+        );
+        let err = up.fetch(&format!("{base}/away.tgz")).unwrap_err();
+        assert!(
+            err.contains("redirected to") && err.contains(&elsewhere),
+            "{err}"
+        );
+        assert_eq!(
+            elsewhere_hits.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the other origin was contacted"
+        );
+        let err = up.fetch(&format!("{base}/loop.tgz")).unwrap_err();
+        assert!(err.contains("more than five"), "{err}");
+    }
+
+    fn ok_with(body: &str) -> String {
+        format!(
+            "HTTP/1.1 200 OK\r\ncontent-length: {}\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    fn redirect(to: &str) -> String {
+        format!("HTTP/1.1 302 Found\r\nlocation: {to}\r\ncontent-length: 0\r\n\r\n")
     }
 
     /// Two spellings of one origin are one origin — otherwise a

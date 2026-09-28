@@ -109,9 +109,10 @@ per blob**. A manifest is at most 128 MiB, which no real manifest
 approaches.
 
 If Skein sits behind a reverse proxy, the proxy must let a large request
-body through: with nginx, `client_max_body_size 0;` and
-`proxy_request_buffering off;` on the location that serves `/v2/`.
-Caddy has no body limit by default.
+body through and stream it: with nginx, `client_max_body_size 0;`,
+`proxy_request_buffering off;` and generous timeouts —
+[`deploy/nginx.conf`](../deploy/nginx.conf) has them. Caddy has no body
+limit by default.
 
 ## Skein must be at the root of a host
 
@@ -132,6 +133,10 @@ host except loopback (`127.0.0.0/8` and `::1`). So:
 - **In production**, put TLS in front of Skein — a load balancer, or a
   reverse proxy such as Caddy or nginx — and log in to the `https://`
   host. See [operations](operations.md).
+- **With a certificate from your own CA**, each docker daemon trusts it
+  from `/etc/docker/certs.d/<host>/ca.crt` — for Skein at
+  `https://skein.example.com`, `/etc/docker/certs.d/skein.example.com/ca.crt`.
+  No restart is needed.
 - **On your own machine**, `docker login 127.0.0.1:8080` works over
   plain HTTP as it is.
 - **Anywhere else without TLS**, every docker daemon that talks to Skein

@@ -8,5 +8,6 @@ publish.workspace = true
 
 [dependencies]
 ureq.workspace = true
+skein-tls.workspace = true
 sha2.workspace = true
 hmac.workspace = true

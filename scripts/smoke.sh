@@ -17,6 +17,11 @@ set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
+# compose.yml has no default passwords, and every `docker compose`
+# command reads it — the cleanup and the log dump included — so these
+# come first.
+export SKEIN_DB_PASSWORD="${SKEIN_DB_PASSWORD:-smoke-db-$RANDOM$RANDOM}"
+export SKEIN_STORE_PASSWORD="${SKEIN_STORE_PASSWORD:-smoke-store-$RANDOM$RANDOM}"
 base="${SMOKE_BASE:-http://127.0.0.1:8080}"
 work="$(mktemp -d)"
 cleanup() {

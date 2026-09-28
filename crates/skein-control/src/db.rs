@@ -8,7 +8,10 @@
 
 use postgres::types::ToSql;
 use postgres::{Client, NoTls, Row};
+use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Duration;
+use tokio_postgres_rustls::MakeRustlsConnect;
 
 /// The control-plane database. One connection behind a mutex — control
 /// operations are point reads/writes measured in microseconds against a
@@ -397,6 +400,175 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     "#,
 ];
 
+/// How to reach the database: the URL's own settings, and TLS when its
+/// `sslmode` asks for it. Built once, from the URL, and kept for every
+/// reconnect — so a bad CA file or an `sslmode` nobody supports is
+/// refused at start, not on the first failover.
+///
+/// `sslmode` is libpq's, and so is `sslrootcert`, so a URL copied from a
+/// cloud console or a DBA works as written:
+///
+/// | `sslmode` | Skein |
+/// |---|---|
+/// | absent, `disable`, `allow`, `prefer` | no TLS — as before this existed |
+/// | `require`, `verify-full` | TLS; the certificate chain **and** the host name are verified |
+/// | `verify-ca` | TLS; the chain is verified, the host name is not |
+///
+/// `require` is stricter than libpq, which encrypts without verifying:
+/// an encrypted connection to whoever answers is not one a registry's
+/// database password should travel over. A server whose certificate
+/// comes from a private CA (Amazon RDS, Azure, a corporate CA) needs
+/// that CA: `sslrootcert=/path/ca.pem` trusts exactly that file, as in
+/// libpq; `sslrootcert=system`, or no `sslrootcert`, trusts the public
+/// roots, the OS store and `SKEIN_CA_FILE`.
+///
+/// Until this existed Skein connected with `NoTls` only: every managed
+/// PostgreSQL that insists on TLS — RDS with `rds.force_ssl`, Azure
+/// Flexible Server — refused it, `sslmode=require` failed its handshake,
+/// and `sslmode=verify-full` was rejected as an invalid URL.
+#[derive(Clone)]
+pub(crate) struct Connector {
+    config: postgres::Config,
+    tls: Option<MakeRustlsConnect>,
+}
+
+/// The TLS settings a URL carries, taken out of it: the `postgres` crate
+/// knows `sslmode` only as disable/prefer/require and not `sslrootcert`
+/// at all, so both are read here and the rest is handed on.
+fn split_tls(url: &str) -> Result<(String, Option<String>, Option<String>), String> {
+    let take = |k: &str, v: &str, mode: &mut Option<String>, root: &mut Option<String>| match k {
+        "sslmode" => {
+            *mode = Some(v.to_string());
+            true
+        }
+        "sslrootcert" => {
+            *root = Some(v.to_string());
+            true
+        }
+        _ => false,
+    };
+    let (mut mode, mut root) = (None, None);
+    if url.starts_with("postgres://") || url.starts_with("postgresql://") {
+        let Some((base, query)) = url.split_once('?') else {
+            return Ok((url.to_string(), None, None));
+        };
+        let mut kept = Vec::new();
+        for pair in query.split('&').filter(|p| !p.is_empty()) {
+            let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+            let v = percent_decode(v)?;
+            if !take(k, &v, &mut mode, &mut root) {
+                kept.push(pair);
+            }
+        }
+        let rest = if kept.is_empty() {
+            base.to_string()
+        } else {
+            format!("{base}?{}", kept.join("&"))
+        };
+        Ok((rest, mode, root))
+    } else {
+        // libpq's `key=value key=value` form.
+        let mut kept = Vec::new();
+        for word in url.split_whitespace() {
+            let (k, v) = word.split_once('=').unwrap_or((word, ""));
+            if !take(k, v.trim_matches('\''), &mut mode, &mut root) {
+                kept.push(word);
+            }
+        }
+        Ok((kept.join(" "), mode, root))
+    }
+}
+
+fn percent_decode(s: &str) -> Result<String, String> {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = s
+                .get(i + 1..i + 3)
+                .and_then(|h| u8::from_str_radix(h, 16).ok())
+                .ok_or_else(|| format!("a bad %-escape in the database URL near {:?}", &s[i..]))?;
+            out.push(hex);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).map_err(|_| "the database URL is not UTF-8".to_string())
+}
+
+impl Connector {
+    pub(crate) fn from_url(url: &str) -> Result<Connector, String> {
+        let (rest, mode, root) = split_tls(url)?;
+        let mut config: postgres::Config = rest
+            .parse()
+            .map_err(|e| format!("SKEIN_DB_URL is not a PostgreSQL URL Skein can read: {e}"))?;
+        // A half-open connection — a failover, a NAT that forgot us —
+        // is noticed by the kernel rather than waited on forever.
+        config
+            .keepalives(true)
+            .keepalives_idle(Duration::from_secs(60));
+        let verify_host = match mode.as_deref() {
+            None | Some("disable" | "allow" | "prefer") => {
+                config.ssl_mode(postgres::config::SslMode::Disable);
+                return Ok(Connector { config, tls: None });
+            }
+            Some("require" | "verify-full") => true,
+            Some("verify-ca") => false,
+            Some(other) => {
+                return Err(format!(
+                    "sslmode={other} is not one Skein knows: use disable, require, verify-ca \
+                     or verify-full"
+                ))
+            }
+        };
+        let roots = match root.as_deref() {
+            None | Some("system") => skein_tls::roots_from_env()?,
+            Some(path) => {
+                skein_tls::roots_only(Path::new(path)).map_err(|e| format!("sslrootcert: {e}"))?
+            }
+        };
+        let tls = skein_tls::client_config(roots, verify_host)?;
+        config.ssl_mode(postgres::config::SslMode::Require);
+        Ok(Connector {
+            config,
+            tls: Some(MakeRustlsConnect::new(tls)),
+        })
+    }
+
+    fn connect(&self) -> Result<Client, postgres::Error> {
+        match &self.tls {
+            None => self.config.connect(NoTls),
+            Some(tls) => self.config.connect(tls.clone()),
+        }
+    }
+}
+
+/// A connection error with its causes: `postgres` says "error performing
+/// TLS handshake" and keeps *why* — an unknown issuer, a name mismatch —
+/// in its source chain, which is the only part anybody can act on.
+fn connect_error(e: &postgres::Error) -> String {
+    let mut out = e.to_string();
+    let mut source = std::error::Error::source(e);
+    while let Some(cause) = source {
+        let s = cause.to_string();
+        if !out.contains(&s) {
+            out.push_str(": ");
+            out.push_str(&s);
+        }
+        source = source.and_then(|s| s.source());
+    }
+    if out.contains("no encryption") {
+        out.push_str(
+            " — this server accepts only TLS: add sslmode=verify-full (and sslrootcert=… for a \
+             private CA) to SKEIN_DB_URL",
+        );
+    }
+    skein_tls::hint(&out)
+}
+
 /// The sync `postgres` client drives its own internal runtime with
 /// `block_on`, which panics if the calling thread carries any tokio
 /// runtime context — async workers and `spawn_blocking` threads alike.
@@ -425,7 +597,7 @@ where
 /// would panic, so Drop hops threads too.
 struct ClientBox {
     client: Option<Client>,
-    url: String,
+    connector: Connector,
     lock_ms: u64,
 }
 
@@ -435,7 +607,7 @@ impl ClientBox {
     }
 
     fn reconnect(&mut self) -> Result<(), postgres::Error> {
-        let mut fresh = Client::connect(&self.url, NoTls)?;
+        let mut fresh = self.connector.connect()?;
         fresh.batch_execute(&format!("SET lock_timeout = {}", self.lock_ms))?;
         // Replace before the old client drops (its Drop is runtime-safe
         // here: reconnect already runs off the async threads via `run`).
@@ -534,8 +706,10 @@ impl ControlDb {
     /// Connect to `postgres://…` and bring the schema current.
     pub fn open(url: &str) -> Result<ControlDb, String> {
         run(|| {
-            let mut conn =
-                Client::connect(url, NoTls).map_err(|e| format!("connect control db: {e}"))?;
+            let connector = Connector::from_url(url)?;
+            let mut conn = connector
+                .connect()
+                .map_err(|e| format!("connect control db: {}", connect_error(&e)))?;
             let lock_ms = std::env::var("SKEIN_DB_LOCK_TIMEOUT_MS")
                 .ok()
                 .and_then(|v| v.parse::<u64>().ok())
@@ -546,7 +720,7 @@ impl ControlDb {
             Ok(ControlDb {
                 conn: Arc::new(Mutex::new(ClientBox {
                     client: Some(conn),
-                    url: url.to_string(),
+                    connector,
                     lock_ms,
                 })),
             })
@@ -574,6 +748,19 @@ impl ControlDb {
             )
             .map_err(|e| e.to_string())?
             .get(0);
+        // A database a newer Skein has migrated is one this build does
+        // not understand: its code would write rows the schema no longer
+        // has, or miss columns the newer one relies on. Refused, so a
+        // rollback to an older release is a decision someone makes with a
+        // backup in hand rather than something that happens quietly.
+        if current > MIGRATIONS.len() as i64 {
+            return Err(format!(
+                "this database is at schema version {current}, written by a newer Skein; this \
+                 build knows versions up to {}. Run that release or a later one — or restore the \
+                 backup taken before the upgrade",
+                MIGRATIONS.len()
+            ));
+        }
         for (i, sql) in MIGRATIONS.iter().enumerate() {
             let version = (i + 1) as i64;
             if version <= current {
@@ -664,6 +851,96 @@ pub(crate) fn is_unique_violation(e: &postgres::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An older build refuses a database a newer one migrated, rather
+    /// than starting against a schema it does not understand.
+    #[test]
+    fn a_database_from_a_newer_release_is_refused() {
+        let url = skein_testkit::pg::test_db_url("db_newer");
+        let db = ControlDb::open(&url).unwrap();
+        let next = MIGRATIONS.len() as i64 + 1;
+        db.lock()
+            .execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES ($1, 0)",
+                &[&next],
+            )
+            .unwrap();
+        drop(db);
+        let err = ControlDb::open(&url)
+            .err()
+            .expect("a newer schema was accepted");
+        assert!(
+            err.contains(&format!("schema version {next}")) && err.contains("newer Skein"),
+            "{err}"
+        );
+    }
+
+    /// A database that accepts only TLS — what RDS, Azure and most
+    /// corporate PostgreSQL look like — is reached, with its certificate
+    /// verified, and only when the URL asks for TLS. Before this, Skein
+    /// connected with `NoTls` whatever the URL said: `sslmode=require`
+    /// failed its handshake and `verify-full` was an invalid URL.
+    #[test]
+    fn a_database_that_insists_on_tls_is_reached_over_verified_tls() {
+        let pki = skein_testkit::pki::Pki::new();
+        let cert = pki.server("pg", &["db.acme.test", "127.0.0.1"]);
+        let pg = skein_testkit::pg::Pg::start_tls(&cert).unwrap();
+        let url = pg.database("tls");
+        let ca = pki.ca_pem.display().to_string();
+
+        // Plain: the server refuses it — which is how the successes below
+        // prove they really were TLS.
+        let err = ControlDb::open(&url).err().expect("plaintext was admitted");
+        assert!(err.contains("no encryption"), "{err}");
+
+        for q in [
+            format!("sslmode=verify-full&sslrootcert={ca}"),
+            format!("sslmode=require&sslrootcert={ca}"),
+            format!("sslmode=verify-ca&sslrootcert={ca}"),
+            // Percent-encoded, as a URL builder would write it.
+            format!("sslmode=verify-full&sslrootcert={}", ca.replace('/', "%2F")),
+        ] {
+            let db = ControlDb::open(&format!("{url}?{q}")).unwrap_or_else(|e| panic!("{q}: {e}"));
+            assert!(crate::registry::ping(&db).is_ok(), "{q}");
+        }
+        // The key=value form libpq also takes.
+        let kv = format!(
+            "host=127.0.0.1 port={} user=skein dbname={} sslmode=verify-full sslrootcert={ca}",
+            pg.port,
+            url.rsplit('/').next().unwrap()
+        );
+        ControlDb::open(&kv).unwrap_or_else(|e| panic!("{kv}: {e}"));
+
+        // Not trusted: said so, with where the CA goes.
+        let err = ControlDb::open(&format!("{url}?sslmode=require"))
+            .err()
+            .expect("a certificate nobody vouches for was accepted");
+        assert!(
+            err.contains("UnknownIssuer") && err.contains("SKEIN_CA_FILE"),
+            "{err}"
+        );
+
+        // A certificate for another host: verify-full refuses it,
+        // verify-ca (the chain, not the name) accepts it.
+        let other = pki.server("other", &["elsewhere.acme.test"]);
+        drop(pg);
+        let pg = skein_testkit::pg::Pg::start_tls(&other).unwrap();
+        let url = pg.database("tls_name");
+        let err = ControlDb::open(&format!("{url}?sslmode=verify-full&sslrootcert={ca}"))
+            .err()
+            .expect("a certificate for another host was accepted");
+        assert!(
+            err.contains("NotValidForName") || err.contains("not valid for"),
+            "{err}"
+        );
+        ControlDb::open(&format!("{url}?sslmode=verify-ca&sslrootcert={ca}")).unwrap();
+
+        // An sslmode nobody supports is refused by name, not guessed at.
+        let err = ControlDb::open(&format!("{url}?sslmode=verify_full"))
+            .err()
+            .unwrap();
+        assert!(err.contains("sslmode=verify_full"), "{err}");
+    }
 
     /// A failing migration says what was wrong with it.
     ///

@@ -920,3 +920,44 @@ fn npm_login_whoami_ping_and_logout_speak_npms_own_endpoints() {
     assert_eq!(login("admin", "admin", &pw).status, 404);
     assert!(server.healthy());
 }
+
+/// Behind a reverse proxy on the same machine — nginx forwarding to
+/// `127.0.0.1:8080`, which sends that as the `Host` — every URL the
+/// registry hands out is the public one. They used to echo the loopback
+/// `Host`, so every tarball and crate download through the proxy pointed
+/// at the client's own machine.
+#[test]
+fn behind_a_proxy_the_urls_handed_out_are_the_public_ones() {
+    let bucket = Minio::shared().bucket("npm-e2e");
+    let server = skein_testkit::Server::builder(env!("CARGO_BIN_EXE_skein"), &bucket.base_url)
+        .db_hint("npm-proxied")
+        .env("SKEIN_PUBLIC_URL", "https://skein.acme.test")
+        .start();
+    let admin = server.bootstrap("acme");
+    let (s, body) = server.req(
+        "PUT",
+        "/npm/@acme%2fbehind",
+        &admin,
+        Some(publish_doc("@acme/behind", "1.0.0", b"x")),
+    );
+    assert_eq!(s, 201, "{body}");
+    // `server.req` reaches the server on 127.0.0.1 — exactly the Host a
+    // proxy on the same machine forwards.
+    let (_, doc) = server.get("/npm/@acme%2fbehind", &admin);
+    let tarball = doc["versions"]["1.0.0"]["dist"]["tarball"]
+        .as_str()
+        .unwrap();
+    assert!(
+        tarball.starts_with("https://skein.acme.test/npm/"),
+        "the tarball URL is not the public one: {tarball}"
+    );
+    let (s, config) = server.get("/cargo/index/config.json", &admin);
+    assert_eq!(s, 200, "{config}");
+    for field in ["dl", "api"] {
+        let url = config[field].as_str().unwrap_or_default();
+        assert!(
+            url.starts_with("https://skein.acme.test/"),
+            "{field}: {config}"
+        );
+    }
+}

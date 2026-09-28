@@ -50,7 +50,9 @@ impl ObjectStore {
             },
             signer: crate::sig::SigV4::from_env(),
             base_url,
-            agent: ureq::AgentBuilder::new()
+            // The trust store every connection shares: a bucket behind
+            // the operator's own CA is trusted through SKEIN_CA_FILE.
+            agent: skein_tls::agent()
                 .timeout_connect(Duration::from_secs(5))
                 .timeout(timeout)
                 .build(),
@@ -270,8 +272,12 @@ impl ObjectStore {
     /// into 403, which would make every missing artifact look like a
     /// permissions failure.
     pub fn probe(&self) -> Result<(), String> {
-        self.list_page("skein-probe/", 1)
-            .map_err(|e| format!("the bucket at {} is not usable: {e}", self.base_url))?;
+        self.list_page("skein-probe/", 1).map_err(|e| {
+            skein_tls::hint(&format!(
+                "the bucket at {} is not usable: {e}",
+                self.base_url
+            ))
+        })?;
         match self.get("skein-probe/absent") {
             Ok(_) => Ok(()),
             Err(e) if is_absent(&e) => Ok(()),
@@ -316,7 +322,7 @@ impl ObjectStore {
             Err(ureq::Error::Status(code, _)) => {
                 Err(format!("create bucket {bucket}: HTTP {code}"))
             }
-            Err(e) => Err(format!("create bucket {bucket}: {e}")),
+            Err(e) => Err(skein_tls::hint(&format!("create bucket {bucket}: {e}"))),
         }
     }
 

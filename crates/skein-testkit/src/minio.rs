@@ -43,6 +43,9 @@ pub struct Minio {
     /// running can be used verbatim: the host may not be `127.0.0.1` and
     /// the scheme may not be `http`.
     pub endpoint: String,
+    /// How the harness itself talks to it: a plain agent, or one trusting
+    /// the private CA of a [`Minio::start_tls`] instance.
+    agent: ureq::Agent,
     /// `None` when the endpoint was handed to us: a MinIO this process did
     /// not start is a MinIO it must not kill, and its data directory is
     /// not ours to delete.
@@ -92,25 +95,65 @@ impl Minio {
     /// been started a second ago by the same script that set the variable.
     fn attach(url: &str) -> Result<Minio, String> {
         let endpoint = url.trim_end_matches('/').to_string();
-        wait_ready(&endpoint)?;
+        let agent = ureq::agent();
+        wait_ready(&agent, &endpoint)?;
         Ok(Minio {
             endpoint,
+            agent,
             _owned: None,
         })
     }
 
     fn start() -> Result<Minio, String> {
+        Minio::start_with(None)
+    }
+
+    /// A private MinIO serving **HTTPS only**, with `cert` from a private
+    /// CA — an object store on an enterprise network. The harness trusts
+    /// exactly `ca_pem`; what Skein trusts is up to the test.
+    ///
+    /// Sets the `AWS_*` variables [`Minio::shared`] sets, with the same
+    /// credentials, so the two can be used in one process.
+    pub fn start_tls(cert: &crate::pki::ServerCert, ca_pem: &Path) -> Result<Minio, String> {
+        std::env::set_var("AWS_ACCESS_KEY_ID", ROOT_USER);
+        std::env::set_var("AWS_SECRET_ACCESS_KEY", ROOT_PASSWORD);
+        std::env::set_var("AWS_REGION", "us-east-1");
+        Minio::start_with(Some((cert, ca_pem)))
+    }
+
+    fn start_with(tls: Option<(&crate::pki::ServerCert, &Path)>) -> Result<Minio, String> {
         let bin = minio_bin()?;
         let data_dir = crate::tempdir::TempDir::new("skein-minio")?;
         let port = free_port()?;
+        let certs = data_dir.path().join("certs");
+        let data = data_dir.path().join("data");
+        std::fs::create_dir_all(&data).map_err(|e| e.to_string())?;
+        let (scheme, agent) = match tls {
+            None => ("http", ureq::agent()),
+            Some((cert, ca)) => {
+                std::fs::create_dir_all(&certs).map_err(|e| e.to_string())?;
+                std::fs::copy(&cert.cert, certs.join("public.crt")).map_err(|e| e.to_string())?;
+                std::fs::copy(&cert.key, certs.join("private.key")).map_err(|e| e.to_string())?;
+                let config = skein_tls::client_config(skein_tls::roots_only(ca)?, true)?;
+                (
+                    "https",
+                    ureq::AgentBuilder::new()
+                        .tls_config(std::sync::Arc::new(config))
+                        .build(),
+                )
+            }
+        };
         let mut minio = Command::new(&bin);
+        minio.args([
+            "server",
+            "--address",
+            &format!("127.0.0.1:{port}"),
+            data.to_str().unwrap(),
+        ]);
+        if tls.is_some() {
+            minio.arg("--certs-dir").arg(&certs);
+        }
         minio
-            .args([
-                "server",
-                "--address",
-                &format!("127.0.0.1:{port}"),
-                data_dir.path().to_str().unwrap(),
-            ])
             .env("MINIO_ROOT_USER", ROOT_USER)
             .env("MINIO_ROOT_PASSWORD", ROOT_PASSWORD)
             // No console, quieter logs.
@@ -122,13 +165,14 @@ impl Minio {
             .map_err(|e| format!("spawn {bin:?}: {e}"))?;
         reap_on_process_exit(child.id(), data_dir.path());
         let m = Minio {
-            endpoint: format!("http://127.0.0.1:{port}"),
+            endpoint: format!("{scheme}://127.0.0.1:{port}"),
+            agent,
             _owned: Some(Owned {
                 _child: KillOnDrop(child),
                 _data_dir: data_dir,
             }),
         };
-        wait_ready(&m.endpoint)?;
+        wait_ready(&m.agent, &m.endpoint)?;
         Ok(m)
     }
 
@@ -172,7 +216,7 @@ impl Minio {
         let authority = self.authority().to_string();
         let path = format!("/{name}");
         let hdrs = signer.sign("PUT", &authority, &path, skein_store::sig::EMPTY_SHA256)?;
-        let mut req = ureq::put(&format!("{}{path}", self.endpoint));
+        let mut req = self.agent.put(&format!("{}{path}", self.endpoint));
         for (n, v) in hdrs.headers {
             req = req.set(n, &v);
         }
@@ -231,11 +275,11 @@ pub(crate) fn reap_on_process_exit(daemon_pid: u32, scratch_dir: &Path) {
 
 /// `/health/ready`, not `/live`: liveness turns 200 before the S3 API
 /// accepts requests on a cold boot (learned in the research harness).
-fn wait_ready(endpoint: &str) -> Result<(), String> {
+fn wait_ready(agent: &ureq::Agent, endpoint: &str) -> Result<(), String> {
     let url = format!("{endpoint}/minio/health/ready");
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        match ureq::get(&url).timeout(Duration::from_millis(500)).call() {
+        match agent.get(&url).timeout(Duration::from_millis(500)).call() {
             Ok(_) => return Ok(()),
             Err(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(100)),
             Err(e) => return Err(format!("minio never became ready at {endpoint}: {e}")),

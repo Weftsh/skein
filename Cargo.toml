@@ -6,6 +6,7 @@ members = [
     "crates/skein-license",
     "crates/skein-server",
     "crates/skein-testkit",
+    "crates/skein-tls",
 ]
 
 [workspace.package]
@@ -20,6 +21,7 @@ skein-store = { path = "crates/skein-store" }
 skein-control = { path = "crates/skein-control" }
 skein-license = { path = "crates/skein-license" }
 skein-testkit = { path = "crates/skein-testkit" }
+skein-tls = { path = "crates/skein-tls" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha1 = "0.10"

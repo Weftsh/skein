@@ -81,6 +81,18 @@ Skein's own npm proxy fetches, and plays no part here. What does help:
   so an artifact other than the one you locked is refused;
 - register your private names on pypi.org yourself, so nobody else can.
 
+### A certificate from your own CA
+
+If Skein's certificate comes from your company's own CA, give pip a bundle holding it *and* the public roots — `cert`
+replaces pip's own list rather than adding to it:
+
+```ini
+[global]
+cert = /etc/pki/bundle-with-acme-ca.pem
+```
+
+twine reads `REQUESTS_CA_BUNDLE` (or `--cert`), with the same bundle.
+
 ## Configuring twine
 
 `~/.pypirc`:

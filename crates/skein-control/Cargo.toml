@@ -8,6 +8,10 @@ publish.workspace = true
 
 [dependencies]
 postgres.workspace = true
+skein-tls.workspace = true
+# TLS to PostgreSQL, on the same rustls and ring as every other
+# connection Skein makes.
+tokio-postgres-rustls = { version = "0.14", features = ["ring"] }
 tokio = { version = "1", features = ["rt", "rt-multi-thread"] }
 sha2.workspace = true
 argon2.workspace = true

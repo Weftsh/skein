@@ -23,6 +23,9 @@ pub const PG_USER: &str = "skein";
 
 pub struct Pg {
     pub port: u16,
+    /// How this harness itself connects for admin work: TCP for a plain
+    /// cluster, the Unix socket for one that accepts only TLS over TCP.
+    admin: String,
     _child: KillOnDrop,
     _data_dir: TempDir,
 }
@@ -158,6 +161,19 @@ impl Pg {
     /// connection — a worker lock released after its database died — and
     /// so cannot share a cluster with anyone.
     pub fn start() -> Result<Pg, String> {
+        Pg::start_with(None)
+    }
+
+    /// A private cluster that accepts **only TLS** over TCP — `ssl=on`,
+    /// and a `pg_hba.conf` whose one TCP line is `hostssl` — presenting
+    /// `cert`. What RDS with `rds.force_ssl`, Azure Flexible Server and
+    /// most corporate databases look like. Its URLs from [`Pg::database`]
+    /// carry no `sslmode`; a test adds the one it is about.
+    pub fn start_tls(cert: &crate::pki::ServerCert) -> Result<Pg, String> {
+        Pg::start_with(Some(cert))
+    }
+
+    fn start_with(tls: Option<&crate::pki::ServerCert>) -> Result<Pg, String> {
         let bin_dir = pg_bin_dir()?;
         let data_dir = TempDir::new("skein-testkit-pg")?;
         let datadir = data_dir.path().join("data");
@@ -178,6 +194,9 @@ impl Pg {
                 "initdb failed: {}",
                 String::from_utf8_lossy(&out.stderr)
             ));
+        }
+        if let Some(tls) = tls {
+            install_tls(&datadir, tls, run_as)?;
         }
 
         // Choosing a port by binding it and letting go is racy, and the
@@ -203,6 +222,18 @@ impl Pg {
                 .args(["-c", "synchronous_commit=off"])
                 .args(["-c", "full_page_writes=off"])
                 .args(["-c", "max_connections=200"])
+                .args(if tls.is_some() {
+                    &[
+                        "-c",
+                        "ssl=on",
+                        "-c",
+                        "ssl_cert_file=server.crt",
+                        "-c",
+                        "ssl_key_file=server.key",
+                    ][..]
+                } else {
+                    &[][..]
+                })
                 .arg("-c")
                 .arg(format!(
                     "unix_socket_directories={}",
@@ -231,7 +262,14 @@ impl Pg {
                 .map_err(|e| format!("spawn postgres: {e}"))?;
             crate::minio::reap_on_process_exit(child.id(), data_dir.path());
 
-            let url = format!("postgres://{PG_USER}@127.0.0.1:{port}/postgres");
+            let url = if tls.is_some() {
+                format!(
+                    "host={} port={port} user={PG_USER} dbname=postgres",
+                    datadir.display()
+                )
+            } else {
+                format!("postgres://{PG_USER}@127.0.0.1:{port}/postgres")
+            };
             // Ten seconds, not thirty: a lost race has to be cheap to
             // discover, because the answer to it is another attempt.
             let deadline = Instant::now() + Duration::from_secs(10);
@@ -254,6 +292,7 @@ impl Pg {
                 Ok(()) => {
                     return Ok(Pg {
                         port,
+                        admin: url,
                         _child: KillOnDrop(child),
                         _data_dir: data_dir,
                     })
@@ -288,8 +327,8 @@ impl Pg {
             .take(30)
             .collect();
         let name = format!("t_{clean}_{}_{seq}", std::process::id());
-        let mut admin = postgres::Client::connect(&self.url("postgres"), postgres::NoTls)
-            .expect("connect postgres");
+        let mut admin =
+            postgres::Client::connect(&self.admin, postgres::NoTls).expect("connect postgres");
         admin
             .batch_execute(&format!("CREATE DATABASE \"{name}\""))
             .expect("create database");
@@ -390,6 +429,36 @@ fn identify(client: &mut postgres::Client, datadir: &Path) -> Result<(), String>
 fn free_port() -> Result<u16, String> {
     let l = std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
     Ok(l.local_addr().map_err(|e| e.to_string())?.port())
+}
+
+/// The server's certificate and key in the data directory, owned by the
+/// user postgres runs as with the key private (postgres refuses a key
+/// anybody else can read), and a `pg_hba.conf` that admits the harness on
+/// the Unix socket and everybody else over TLS only.
+fn install_tls(
+    datadir: &Path,
+    tls: &crate::pki::ServerCert,
+    run_as: Option<(u32, u32)>,
+) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    let cert = datadir.join("server.crt");
+    let key = datadir.join("server.key");
+    let hba = datadir.join("pg_hba.conf");
+    std::fs::copy(&tls.cert, &cert).map_err(|e| format!("copy the certificate: {e}"))?;
+    std::fs::copy(&tls.key, &key).map_err(|e| format!("copy the key: {e}"))?;
+    std::fs::write(
+        &hba,
+        "local all all trust\nhostssl all all 127.0.0.1/32 trust\n",
+    )
+    .map_err(|e| format!("write pg_hba.conf: {e}"))?;
+    std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600))
+        .map_err(|e| e.to_string())?;
+    if let Some((uid, gid)) = run_as {
+        for f in [&cert, &key, &hba] {
+            std::os::unix::fs::chown(f, Some(uid), Some(gid)).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
 }
 
 /// Root can't run postgres: resolve the `postgres` system user and chown

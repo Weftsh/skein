@@ -11,23 +11,38 @@ needs.
 With Docker Compose — Skein, PostgreSQL and MinIO on one machine:
 
 ```sh
+cp .env.example .env          # set SKEIN_DB_PASSWORD and SKEIN_STORE_PASSWORD in it
 docker compose up -d --build --wait
 docker compose exec skein skein admin bootstrap --org acme
 ```
 
-Open `http://localhost:8080` and sign in as `admin` with the password
-the bootstrap printed. Change the passwords in `compose.yml` first, and
-for anything beyond a trial put TLS in front of port 8080 and set
-`SKEIN_PUBLIC_URL`.
+`compose.yml` has no default passwords and refuses to start without
+them. Open `http://localhost:8080` and sign in as `admin` with the
+password the bootstrap printed.
+
+With TLS in front, which is how anything beyond a trial should run: put
+your certificate and key in a directory as `skein.crt` (the full chain,
+leaf first) and `skein.key`, and in `.env` set `SKEIN_TLS_DIR` to that
+directory and `SKEIN_PUBLIC_URL` to the `https://` address the
+certificate names. Then
+
+```sh
+docker compose -f compose.yml -f compose.tls.yml up -d --build --wait
+```
+
+runs nginx ([`deploy/nginx.conf`](../deploy/nginx.conf)) on 443 and 80
+and stops publishing Skein's own port.
 
 Or run the image on its own against a PostgreSQL and a bucket you
 already have:
 
 ```sh
 docker run -d -p 8080:8080 \
-  -e SKEIN_DB_URL=postgres://… -e SKEIN_STORE_URL=https://… \
+  -e SKEIN_DB_URL='postgres://skein:…@db.internal:5432/skein?sslmode=verify-full' \
+  -e SKEIN_STORE_URL=https://… \
   -e AWS_ACCESS_KEY_ID=… -e AWS_SECRET_ACCESS_KEY=… -e AWS_REGION=… \
   -e SKEIN_PUBLIC_URL=https://skein.example.com \
+  -e SKEIN_CA_FILE=/etc/skein/ca.pem -v /etc/pki/acme-ca.pem:/etc/skein/ca.pem:ro \
   ghcr.io/weftsh/skein
 ```
 
@@ -58,17 +73,103 @@ Everything is the environment.
 | `SKEIN_DB_LOCK_TIMEOUT_MS` | `5000` | How long a write waits on another's lock before failing rather than hanging a request. |
 | `SKEIN_LICENSE_KEY` | *(none)* | Your Skein licence key. Applied on start when it differs from the one last applied, so a key installed from the UI stands until this changes. See [licensing.md](licensing.md). |
 | `SKEIN_LICENSE_ENDPOINT` | `https://license.weft.sh/v1/check` | Where an online licence's daily check goes. Must be HTTPS. |
+| `SKEIN_CA_FILE` | *(none)* | A PEM file of your own CA certificates, trusted for every TLS connection Skein makes — the database, the bucket, an npm mirror, the licence endpoint. See [TLS and your own CA](#tls-and-your-own-ca). A file that is missing or holds no certificate refuses to start. |
+| `SSL_CERT_FILE`, `SSL_CERT_DIR` | the OS's | Where the operating system's trust store is read from, as OpenSSL reads them. |
+| `AWS_DEFAULT_REGION` | — | Read when `AWS_REGION` is not set. |
+| `SKEIN_UPSTREAM_<ECOSYSTEM>` | — | An ecosystem's pull-through upstream. Only npm has a proxy today, so only `SKEIN_UPSTREAM_NPM` does anything. |
 
-Skein serves plain HTTP. Put TLS in front of it — a load balancer, or a
-reverse proxy such as Caddy or nginx — and set `SKEIN_PUBLIC_URL` to the
-`https://` address people use.
+For development and tests only — never set these in production:
 
-Container images need two more things: Skein at the **root** of its own
-host name, because a container client has nowhere to put a base path,
-and a proxy that lets a multi-gigabyte request body through. See
-[containers.md](containers.md).
+| Variable | Meaning |
+|---|---|
+| `SKEIN_DEV_MODE` | `1` admits the two below and a plain-HTTP licence endpoint. |
+| `SKEIN_DEV_LICENSE_PUBLIC_KEYS` | Extra licence signing keys to trust, as JSON `{"kid": "PEM"}`. Refused without `SKEIN_DEV_MODE=1`. |
+| `SKEIN_LICENSE_CHECK_DELAY_SECS` | Seconds before the first licence check, instead of a random part of an hour. |
+| `SKEIN_INSTANCE_ID` | Echoed on `/healthz` as `x-skein-instance`, so a test harness can tell its own server from another on the same port. |
 
-### Outbound connections
+Unset, `SKEIN_PUBLIC_URL` is `http://localhost:8080`, and Skein says so
+loudly when it starts: every URL it hands out — npm tarballs, Cargo's
+index, the snippets on the UI's **Connect a client** page — would name a
+host nobody else can reach.
+
+## TLS and your own CA
+
+Skein trusts three sets of certificates, together, for every TLS
+connection it makes: the public roots it was built with, the operating
+system's store, and **`SKEIN_CA_FILE`**. On a network whose database,
+bucket or npm mirror present certificates from your own CA, put that CA
+(and any intermediates) in one PEM file and set `SKEIN_CA_FILE` to it;
+nothing else needs to change. A certificate Skein cannot verify fails
+with `UnknownIssuer` and a sentence naming `SKEIN_CA_FILE`, on `/readyz`
+and in the log.
+
+**PostgreSQL** is reached over TLS when `SKEIN_DB_URL` says so, with
+libpq's own parameters, so a URL from your cloud console works as
+written:
+
+| `sslmode` | |
+|---|---|
+| absent, `disable`, `prefer` | no TLS |
+| `require`, `verify-full` | TLS; the certificate and the host name are verified |
+| `verify-ca` | TLS; the certificate is verified, the host name is not — for a database reached by an address its certificate does not name |
+
+`require` verifies, where libpq's does not: Skein will not send its
+database password to a server it cannot identify. `sslrootcert=/path`
+trusts exactly that file, as in libpq — Amazon RDS and Azure publish
+their CA bundles for this; without it, the three sets above apply. For
+example:
+
+```
+SKEIN_DB_URL=postgres://skein:…@skein.abc123.eu-west-1.rds.amazonaws.com:5432/skein?sslmode=verify-full&sslrootcert=/etc/skein/rds-global-bundle.pem
+```
+
+Mount the file into the container and name the path inside it.
+
+## Behind a reverse proxy or load balancer
+
+Skein serves plain HTTP on `SKEIN_BIND`; put TLS in front of it and set
+`SKEIN_PUBLIC_URL` to the `https://` address people use. Skein writes
+that URL — never the `Host` a request arrived with — into everything it
+hands out, so the proxy's `Host` header does not matter to it.
+[`deploy/nginx.conf`](../deploy/nginx.conf) is a working configuration;
+whatever you run, it needs:
+
+- **No body limit below Skein's own.** A publish is one request body:
+  up to 128 MiB of artifact for Maven, PyPI and Cargo, about 171 MiB of
+  base64 for npm, and a container layer of any size up to 16 GiB. nginx
+  refuses anything over 1 MiB by default (`client_max_body_size 0;`
+  lifts it); a cloud load balancer may have its own ceiling.
+- **Streaming, not buffering**, so a large layer is not spooled to the
+  proxy's disk first (`proxy_request_buffering off;`).
+- **Timeouts long enough for a large push** — minutes, not the usual
+  60 seconds.
+- **HTTP/1.1 to clients if you can.** Maven, twine and pip print only
+  the status line of a refusal, so Skein puts its sentence — "rita is a
+  reader here, and a reader may not publish…" — in the reason phrase.
+  HTTP/2 has no reason phrase, and some load balancers rewrite it; the
+  refusal is still correct, only less informative (twine shows the body
+  with `--verbose`).
+- Container images need Skein at the **root** of its own host name: a
+  container client has nowhere to put a base path. See
+  [containers.md](containers.md).
+
+## Several replicas
+
+Run as many `skein` processes as you like against one database and one
+bucket, behind a load balancer; no stickiness is needed. Sessions,
+tokens, upload sessions (a `docker push` whose requests land on
+different replicas) and the licence check all live in the database; the
+collector's deletes are re-checked, so every replica may run it.
+
+## Sizing
+
+A publish is held in memory while its digest is checked: plan for the
+largest artifact your people publish, times the publishes that happen at
+once, on top of a few tens of megabytes per process. Container layers
+are streamed in 16 MiB blocks and are the exception. Each process holds
+one database connection.
+
+## Outbound connections
 
 Skein connects to its database and bucket, and to two things on the
 internet, both optional:
@@ -77,6 +178,12 @@ internet, both optional:
   mode;
 - `license.weft.sh`, once a day, only with an online licence key — see
   [licensing.md](licensing.md).
+
+Each trusts what every TLS connection trusts, `SKEIN_CA_FILE` included,
+so an internal mirror under your own CA works. The npm upstream's
+redirects are followed only while they stay on the configured upstream;
+a mirror that hands downloads to another host is refused with a
+sentence saying so.
 
 Both connect **directly**: `HTTPS_PROXY` is not read today. The HTTP
 client's own proxy support ignores `NO_PROXY`, so honouring it would
@@ -125,6 +232,61 @@ skein admin mint-token ci --scope package:write --label release
 
 Skein will not let the last active admin be demoted, disabled or
 deleted — from the UI, the API or the command line.
+
+## Backing up and restoring
+
+Everything is in two places: the database and the bucket. Bytes are
+content-addressed and never change once written, and a publish writes
+its bytes before the row that names them — so a backup is consistent if
+the **database is dumped first and the bucket copied after**: every
+file the dump names is already in the bucket.
+
+```sh
+# 1. The database.
+pg_dump -Fc "$SKEIN_DB_URL" > skein-$(date +%F).dump
+# 2. The bucket, after the dump finished. MinIO's client shown; aws s3 sync works the same.
+mc mirror --overwrite skein/skein backup/skein-$(date +%F)
+```
+
+The collector deletes bytes a package no longer needs once they have
+been unreferenced for `SKEIN_GC_GRACE_SECS` (an hour by default). If a
+bucket copy may take longer than that, stop the collector for the
+duration (`SKEIN_GC_INTERVAL_SECS=0`) or keep bucket versioning on, so
+that nothing the dump names is collected before it is copied.
+
+To restore, into an empty database and bucket:
+
+```sh
+pg_restore --no-owner -d "$SKEIN_DB_URL" skein-2026-09-28.dump
+mc mirror backup/skein-2026-09-28 skein/skein
+```
+
+then start Skein. Bytes the bucket holds that the dump does not name —
+publishes after the dump — are collected after the grace period.
+
+## Upgrading
+
+Stop every replica, take a backup, start the new release: it migrates
+the database on start, under a lock, so replicas starting together wait
+for one another. Then start the rest. Migrations only go forward; a
+release refuses to start against a database a newer release migrated,
+saying which versions it knows. Going back means restoring the backup
+taken before the upgrade.
+
+## The admin command line
+
+`skein admin …` runs against the same environment as the server —
+`docker compose exec skein skein admin …` in Compose.
+
+| | |
+|---|---|
+| `bootstrap --org <name>` | create the organization and its first admin, once |
+| `create-user <name> [--role reader\|publisher\|admin] [--no-password]` | add a person, or a CI service account with `--no-password` |
+| `reset-password <name>` | a new password, and signed out everywhere |
+| `set-role <name> <role>` | change what somebody may do |
+| `mint-token <name> --scope <scope> [--label …]` | a token, printed once |
+| `gc [--grace-secs N]` | collect unreferenced bytes now |
+| `license status\|install\|check\|keys` | the licence — see [licensing.md](licensing.md) |
 
 ## Collecting unreferenced bytes
 

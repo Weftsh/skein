@@ -190,6 +190,16 @@ fn state() -> Result<app::SharedState, String> {
 }
 
 fn serve() -> Result<(), String> {
+    // A broken SKEIN_CA_FILE refuses to start: every TLS connection
+    // failing later, one by one, is a worse way to learn it.
+    skein_tls::check()?;
+    if std::env::var("SKEIN_PUBLIC_URL").map_or(true, |v| v.trim().is_empty()) {
+        eprintln!(
+            "skein: WARNING: SKEIN_PUBLIC_URL is not set, so every URL Skein hands out — npm \
+             tarballs, Cargo's index, the UI's client snippets — names http://localhost:8080. \
+             Set it to the address people reach Skein at, e.g. https://skein.example.com"
+        );
+    }
     let state = state()?;
     // MinIO and the other self-hosted stores: create the bucket rather
     // than make everybody reach for a separate tool first.
@@ -232,6 +242,7 @@ fn user(db: &ControlDb, username: &str) -> Result<skein_control::users::User, St
 }
 
 fn admin(cmd: Admin) -> Result<(), String> {
+    skein_tls::check()?;
     if let Admin::License(LicenseCmd::Keys { json }) = cmd {
         let ids = license::Licensing::from_env()?.trusted_key_ids();
         if json {

@@ -1774,9 +1774,16 @@ fn docker_pushes_and_pulls_through_skein() {
     docker_ok(&reader_cfg, &["tag", &by_digest, &format!("{app}:reader")]);
     let (ok, out) = docker(&reader_cfg, &["push", &format!("{app}:reader")], None);
     assert!(!ok, "a reader pushed:\n{out}");
-    assert!(out.contains("denied"), "{out}");
+    // How docker words a registry's DENIED depends on its image store:
+    // the classic one prints `denied: <message>`, the containerd store —
+    // the default for a fresh Docker 29 install — `error from registry:
+    // <message>`. Either way the sentence is what reaches the person.
     assert!(
-        out.contains("rita is a reader"),
+        out.contains("denied") || out.contains("error from registry"),
+        "{out}"
+    );
+    assert!(
+        out.contains("rita is a reader here, and a reader may not push"),
         "docker did not show the reason:\n{out}"
     );
 

@@ -86,6 +86,18 @@ Maven's own global settings. Put TLS in front of Skein and set
 [operations](operations.md)). `http://localhost` and `http://127.0.0.1`
 work for trying it out.
 
+### A certificate from your own CA
+
+If Skein's certificate comes from your company's own CA, Maven trusts what the JVM trusts. Add the CA to a copy of the
+JDK's trust store and hand it to Maven:
+
+```sh
+cp "$JAVA_HOME/lib/security/cacerts" ~/.m2/truststore.jks
+keytool -importcert -noprompt -alias acme-ca -file /etc/pki/acme-ca.pem \
+  -keystore ~/.m2/truststore.jks -storepass changeit
+export MAVEN_OPTS="-Djavax.net.ssl.trustStore=$HOME/.m2/truststore.jks -Djavax.net.ssl.trustStorePassword=changeit"
+```
+
 ## Deploying
 
 Name the repository in the project's `distributionManagement` — a

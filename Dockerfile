@@ -25,10 +25,9 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     && strip /skein
 
 FROM debian:bookworm-slim AS base
-# `ca-certificates` is not optional, and `--no-install-recommends` would
-# leave it out: the npm proxy reaches registry.npmjs.org over TLS, and an
-# S3 endpoint on AWS is TLS. stratum-core shipped an image without it
-# once and every outbound HTTPS call failed certificate verification.
+# `ca-certificates`: the OS store is one of the three sources of trust
+# (with the public roots compiled in and SKEIN_CA_FILE), and curl needs it
+# for the healthcheck. `--no-install-recommends` would leave it out.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl tini \
     && rm -rf /var/lib/apt/lists/* \
@@ -36,9 +35,10 @@ RUN apt-get update \
 ENV SKEIN_BIND=0.0.0.0:8080
 EXPOSE 8080
 # Liveness only: /readyz touches the database and the bucket, and a
-# probe that runs every few seconds should not.
+# probe that runs every few seconds should not. The port is SKEIN_BIND's:
+# a fixed :8080 here marked a healthy server on another port unhealthy.
 HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=3 \
-  CMD ["curl", "-fsS", "http://127.0.0.1:8080/healthz"]
+  CMD curl -fsS "http://127.0.0.1:${SKEIN_BIND##*:}/healthz" || exit 1
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/skein"]
 
 # The release workflow's image: the static binaries it already built

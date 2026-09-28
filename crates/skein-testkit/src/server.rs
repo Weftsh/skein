@@ -268,7 +268,14 @@ impl Server {
 
     /// Run `skein <args>` against this server's database and bucket.
     pub fn admin(&self, args: &[&str]) -> Result<String, String> {
-        let out = base_command(&self.bin, &self.store_url, &self.db_url)
+        // With the server's own environment: an admin command run without
+        // the `SKEIN_CA_FILE` or licence settings the server has is a
+        // different install from the one under test.
+        let mut cmd = base_command(&self.bin, &self.store_url, &self.db_url);
+        for (k, v) in &self.env {
+            cmd.env(k, v.replace("{bind}", self.host()));
+        }
+        let out = cmd
             .args(args)
             .output()
             .map_err(|e| format!("spawn {}: {e}", self.bin))?;

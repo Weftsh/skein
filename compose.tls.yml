@@ -1,0 +1,25 @@
+# TLS in front of Skein, with nginx:
+#
+#   docker compose -f compose.yml -f compose.tls.yml up -d --build --wait
+#
+# SKEIN_TLS_DIR (in .env) is a directory holding skein.crt — the full
+# chain, leaf first — and skein.key; SKEIN_PUBLIC_URL must be the
+# https:// address that certificate names. Skein's own port is no longer
+# published: everything comes in through nginx.
+
+services:
+  skein:
+    ports: !reset []
+
+  nginx:
+    image: nginx:1.27
+    restart: unless-stopped
+    ports:
+      - "443:443"
+      - "80:80"
+    volumes:
+      - ./deploy/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ${SKEIN_TLS_DIR:?set SKEIN_TLS_DIR in .env to a directory holding skein.crt and skein.key}:/etc/nginx/tls:ro
+    depends_on:
+      skein:
+        condition: service_healthy

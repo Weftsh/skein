@@ -14,6 +14,7 @@ path = "src/main.rs"
 skein-store.workspace = true
 skein-control.workspace = true
 skein-license.workspace = true
+skein-tls.workspace = true
 axum = "0.7"
 # Only for `hyper::ext::ReasonPhrase`: Maven, twine and pip show a person
 # the status line of a refusal and never its body, so those doors write

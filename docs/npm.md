@@ -39,6 +39,17 @@ A token carries its owner's authority **now**: demote somebody and the
 token in their `.npmrc` loses the difference on its next request;
 disable them and it stops working.
 
+### A certificate from your own CA
+
+If Skein's certificate comes from your company's own CA, point Node at that CA; npm then trusts it alongside the public
+roots, so the rest of npmjs keeps working:
+
+```sh
+export NODE_EXTRA_CA_CERTS=/etc/pki/acme-ca.pem
+```
+
+(`cafile` in `.npmrc` also works, but *replaces* the public roots.)
+
 ## Publishing
 
 ```sh

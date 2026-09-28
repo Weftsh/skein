@@ -138,7 +138,7 @@ pub fn parse_response(raw: &Value) -> Option<CheckResponse> {
 /// does not complete the check, and that is a warning after seven days,
 /// never a refusal.
 pub fn send(req: &CheckRequest, opts: &CheckOptions) -> CheckOutcome {
-    let agent = ureq::AgentBuilder::new()
+    let agent = skein_tls::agent()
         .redirects(0)
         .timeout(opts.timeout)
         .user_agent(&format!("skein/{}", req.version))

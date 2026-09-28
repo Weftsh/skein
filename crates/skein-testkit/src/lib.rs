@@ -13,6 +13,7 @@ pub(crate) mod detach;
 pub mod fake_registry;
 pub mod minio;
 pub mod pg;
+pub mod pki;
 pub mod server;
 pub(crate) mod tempdir;
 pub mod wait;

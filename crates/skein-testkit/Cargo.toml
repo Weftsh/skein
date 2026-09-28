@@ -12,3 +12,5 @@ ureq.workspace = true
 postgres.workspace = true
 libc.workspace = true
 serde_json.workspace = true
+skein-tls.workspace = true
+rcgen = "0.14"

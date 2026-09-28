@@ -156,11 +156,17 @@ pub fn provenance(p: &Principal) -> packages::Provenance<'_> {
 ///
 /// * the configured public URL, whenever `Host` is the one it names —
 ///   which keeps the scheme the deployment chose, TLS and all;
-/// * `http://<host>` when `Host` is **loopback**, where the only client
-///   that could be misdirected is the one that chose the address.
+/// * `http://<host>` when `Host` is **loopback and the configured URL is
+///   loopback too** — a development install, where the only client that
+///   could be misdirected is the one that chose the address.
 ///
 /// Anything else falls back to the configured URL rather than trusting
-/// it.
+/// it. The second rule used to echo *any* loopback `Host`, and that is
+/// exactly what a reverse proxy on the same machine sends: nginx's
+/// `proxy_pass http://127.0.0.1:8080` forwards `Host: 127.0.0.1:8080`
+/// by default, so every npm tarball and Cargo download URL named
+/// `http://127.0.0.1:8080` — the client's own machine — and every
+/// install through the proxy failed.
 pub fn self_base(state: &SharedState, headers: &HeaderMap) -> String {
     base_for(&state.public_url, headers)
 }
@@ -191,7 +197,11 @@ fn base_for(public_url: &str, headers: &HeaderMap) -> String {
     {
         return configured;
     }
-    if is_loopback_authority(host) {
+    let configured_is_loopback = configured
+        .split_once("://")
+        .map(|(_, rest)| is_loopback_authority(rest.split('/').next().unwrap_or_default()))
+        .unwrap_or(false);
+    if configured_is_loopback && is_loopback_authority(host) {
         return format!("http://{host}");
     }
     configured
@@ -474,9 +484,22 @@ mod tests {
         let configured = "https://skein.example";
         let base = |host: &str| base_for(configured, &with_host(host));
         assert_eq!(base("skein.example"), "https://skein.example");
-        assert_eq!(base("127.0.0.1:41234"), "http://127.0.0.1:41234");
-        assert_eq!(base("localhost:8080"), "http://localhost:8080");
-        assert_eq!(base("[::1]:8080"), "http://[::1]:8080");
+        // A reverse proxy on the same machine forwards a loopback Host;
+        // a production install answers with its own URL regardless.
+        for proxy in ["127.0.0.1:8080", "localhost:8080", "[::1]:8080"] {
+            assert_eq!(
+                base(proxy),
+                configured,
+                "{proxy} leaked into a production URL"
+            );
+        }
+        // A development install on loopback echoes the loopback address
+        // its client chose.
+        let dev = |host: &str| base_for("http://127.0.0.1:8080", &with_host(host));
+        assert_eq!(dev("127.0.0.1:41234"), "http://127.0.0.1:41234");
+        assert_eq!(dev("localhost:8080"), "http://localhost:8080");
+        assert_eq!(dev("[::1]:8080"), "http://[::1]:8080");
+        assert_eq!(dev("evil.example"), "http://127.0.0.1:8080");
         for hostile in [
             "evil.example",
             "skein.example.evil.test",

@@ -39,6 +39,16 @@ registry and mints the token they need. A token with `package:read`
 resolves and downloads; publishing and yanking need `package:write`,
 and a role that allows it.
 
+### A certificate from your own CA
+
+If Skein's certificate comes from your company's own CA, give Cargo a bundle holding it and the public roots (crates.io
+still has to verify):
+
+```toml
+[http]
+cainfo = "/etc/pki/bundle-with-acme-ca.pem"
+```
+
 ## Depending on a crate
 
 ```sh
