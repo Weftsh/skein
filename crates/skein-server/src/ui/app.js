@@ -444,7 +444,7 @@ function snippets(eco, token) {
       ["Then", "npm publish\nnpm install @" + org + "/<package>"],
     ];
     case "maven": return [
-      ["~/.m2/settings.xml", `<settings>\n  <servers>\n    <server>\n      <id>skein</id>\n      <username>skein</username>\n      <password>${tok}</password>\n    </server>\n  </servers>\n  <profiles>\n    <profile>\n      <id>skein</id>\n      <repositories>\n        <repository>\n          <id>skein</id>\n          <url>${b}/maven/</url>\n        </repository>\n      </repositories>\n    </profile>\n  </profiles>\n  <activeProfiles><activeProfile>skein</activeProfile></activeProfiles>\n</settings>`],
+      ["~/.m2/settings.xml", `<settings>\n  <servers>\n    <server>\n      <id>skein</id>\n      <username>skein</username>\n      <password>${tok}</password>\n    </server>\n  </servers>\n  <profiles>\n    <profile>\n      <id>skein</id>\n      <repositories>\n        <repository>\n          <id>skein</id>\n          <url>${b}/maven/</url>\n          <releases><enabled>true</enabled></releases>\n          <snapshots><enabled>false</enabled></snapshots>\n        </repository>\n      </repositories>\n    </profile>\n  </profiles>\n  <activeProfiles><activeProfile>skein</activeProfile></activeProfiles>\n</settings>`],
       ["Deploy", `mvn deploy -DaltDeploymentRepository=skein::${b}/maven/`],
     ];
     case "pypi": return [

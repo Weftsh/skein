@@ -73,7 +73,7 @@ fn an_install_says_how_to_set_it_up_and_is_ready_once_it_is() {
     let boot = bootstrap_json(&server, &[]);
     assert_eq!(boot["org"], "acme");
     assert_eq!(boot["username"], "admin");
-    assert_eq!(boot["ecosystems"], serde_json::json!(["npm"]));
+    assert_eq!(boot["ecosystems"], serde_json::json!(["npm", "maven"]));
     let password = boot["password"].as_str().expect("a generated password");
     assert!(password.len() >= 20, "{password}");
 

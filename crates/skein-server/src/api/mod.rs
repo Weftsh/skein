@@ -3,6 +3,7 @@
 //! scripts use.
 
 pub mod license_api;
+pub mod maven_api;
 pub mod npm_api;
 pub mod packages_api;
 pub mod people_api;

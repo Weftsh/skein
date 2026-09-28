@@ -10,7 +10,7 @@
 //! organization exists. From then on it is read once and kept: its id is
 //! the store prefix, and ids do not change.
 
-use crate::api::{license_api, npm_api, packages_api, people_api, registry_door};
+use crate::api::{license_api, maven_api, npm_api, packages_api, people_api, registry_door};
 use axum::extract::{Request, State};
 use axum::http::{header, HeaderValue, Method, StatusCode};
 use axum::middleware::{self, Next};
@@ -95,7 +95,7 @@ impl AppState {
 /// here would answer 404 for everything, which reads as a broken
 /// registry rather than a missing feature.
 pub fn served(eco: Ecosystem) -> bool {
-    matches!(eco, Ecosystem::Npm)
+    matches!(eco, Ecosystem::Npm | Ecosystem::Maven)
 }
 
 pub fn router(state: SharedState) -> Router {
@@ -174,6 +174,16 @@ pub fn router(state: SharedState) -> Router {
                 .layer(axum::extract::DefaultBodyLimit::max(
                     npm_api::PUBLISH_BODY_LIMIT,
                 )),
+        )
+        // Maven `PUT`s each file of a release at a path derived from its
+        // coordinate and `GET`s it back. One wildcard, because a groupId
+        // has any number of segments: `maven::parse_path` reads the
+        // coordinate from the right, the only way it is unambiguous.
+        .route(
+            "/maven/*path",
+            get(maven_api::get)
+                .put(maven_api::put)
+                .layer(axum::extract::DefaultBodyLimit::max(maven_api::BODY_LIMIT)),
         )
         .nest("/api/v1", api)
         .layer(middleware::from_fn_with_state(state.clone(), setup_layer))

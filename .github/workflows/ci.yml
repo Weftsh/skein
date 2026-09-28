@@ -68,6 +68,13 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      # `mvn` comes from the runner image; the JDK it builds with is
+      # pinned, so a change of the image's default Java is not a change
+      # of what this job proves.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
       - name: MinIO version
         id: minio
         run: echo "release=$(cat .minio-version)" >> "$GITHUB_OUTPUT"
@@ -82,7 +89,7 @@ jobs:
       # exists to prove each contract against the real thing.
       - name: Real clients against a real server
         env:
-          SKEIN_REQUIRE_CLIENTS: npm,python3
+          SKEIN_REQUIRE_CLIENTS: npm,python3,mvn
         run: cargo test -p skein-server --test clients_e2e -- --nocapture
 
   ui:
