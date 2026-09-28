@@ -65,8 +65,8 @@ docker pull skein.example.com/team/service@sha256:…
 
 That is what a deployment should pin.
 
-Tags are compared without regard to case today, so `V1` and `v1` are
-one tag and pushing either replaces the other. Use lowercase tags.
+Tags are case-sensitive, as every container registry's are: `V1` and
+`v1` are two tags, and pushing one never moves the other.
 
 A tag can be deleted through the registry API by a publisher —
 `DELETE /v2/<repository>/manifests/<tag>`. A manifest cannot be deleted
