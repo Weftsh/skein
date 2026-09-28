@@ -10,7 +10,9 @@
 //! organization exists. From then on it is read once and kept: its id is
 //! the store prefix, and ids do not change.
 
-use crate::api::{license_api, maven_api, npm_api, packages_api, people_api, registry_door};
+use crate::api::{
+    license_api, maven_api, npm_api, packages_api, people_api, pypi_api, registry_door,
+};
 use axum::extract::{Request, State};
 use axum::http::{header, HeaderValue, Method, StatusCode};
 use axum::middleware::{self, Next};
@@ -95,7 +97,7 @@ impl AppState {
 /// here would answer 404 for everything, which reads as a broken
 /// registry rather than a missing feature.
 pub fn served(eco: Ecosystem) -> bool {
-    matches!(eco, Ecosystem::Npm | Ecosystem::Maven)
+    matches!(eco, Ecosystem::Npm | Ecosystem::Maven | Ecosystem::Pypi)
 }
 
 pub fn router(state: SharedState) -> Router {
@@ -185,6 +187,25 @@ pub fn router(state: SharedState) -> Router {
                 .put(maven_api::put)
                 .layer(axum::extract::DefaultBodyLimit::max(maven_api::BODY_LIMIT)),
         )
+        // PyPI. Two doors on one prefix: pip reads the Simple API
+        // under `/pypi/simple/`, and twine POSTs its form to the
+        // repository URL itself — which is the bare `/pypi`, with or
+        // without a trailing slash depending on what somebody wrote in
+        // their `.pypirc`, so both are registered rather than one being
+        // a redirect twine refuses to follow for a POST.
+        .route(
+            "/pypi",
+            post(pypi_api::upload).layer(axum::extract::DefaultBodyLimit::max(
+                pypi_api::UPLOAD_BODY_LIMIT,
+            )),
+        )
+        .route(
+            "/pypi/",
+            post(pypi_api::upload).layer(axum::extract::DefaultBodyLimit::max(
+                pypi_api::UPLOAD_BODY_LIMIT,
+            )),
+        )
+        .route("/pypi/*path", get(pypi_api::get))
         .nest("/api/v1", api)
         .layer(middleware::from_fn_with_state(state.clone(), setup_layer))
         .layer(middleware::from_fn(csrf_layer))

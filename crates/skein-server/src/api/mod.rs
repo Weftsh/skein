@@ -7,6 +7,7 @@ pub mod maven_api;
 pub mod npm_api;
 pub mod packages_api;
 pub mod people_api;
+pub mod pypi_api;
 pub mod registry_door;
 
 use crate::app::SharedState;

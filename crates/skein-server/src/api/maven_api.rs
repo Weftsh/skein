@@ -68,49 +68,8 @@ pub const BODY_LIMIT: usize = blobs::MAX_ARTIFACT;
 /// body keeps it too, as plain text, for `curl` and a browser.
 fn maven_error(status: StatusCode, msg: impl Into<String>) -> Response {
     let msg = msg.into();
-    let reason = reason_phrase(&msg);
-    let mut r = (status, [(header::CONTENT_TYPE, "text/plain")], msg).into_response();
-    // Cannot fail — `reason_phrase` emits only what a status line may
-    // carry — but a refusal that lost its sentence is still a refusal,
-    // so a failure here is the standard phrase rather than a panic.
-    if let Ok(p) = hyper::ext::ReasonPhrase::try_from(reason) {
-        r.extensions_mut().insert(p);
-    }
-    r
-}
-
-/// The longest reason phrase this door writes. Every sentence here is
-/// shorter; the ceiling is for a filename echoed back in a 409, which
-/// is somebody's input.
-const MAX_REASON: usize = 512;
-
-/// A sentence as a status line may carry it: one line of printable
-/// ASCII.
-///
-/// A CR or LF here would end the status line and start a header —
-/// response splitting — so every control character becomes a space.
-/// Non-ASCII is legal on the wire as `obs-text`, but HTTP gives it no
-/// charset and a client may read it as Latin-1, which turns an em dash
-/// into `â€”` in somebody's build log; the few this file writes are
-/// spelled in ASCII and anything else is a `?`.
-fn reason_phrase(msg: &str) -> String {
-    let mut out: String = msg
-        .chars()
-        .map(|c| match c {
-            '\u{2014}' | '\u{2013}' => '-',
-            '\u{2018}' | '\u{2019}' => '\'',
-            '\u{201c}' | '\u{201d}' => '"',
-            '\u{2026}' => '.',
-            c if c.is_ascii_graphic() || c == ' ' => c,
-            c if c.is_whitespace() || c.is_control() => ' ',
-            _ => '?',
-        })
-        .collect();
-    if out.len() > MAX_REASON {
-        out.truncate(MAX_REASON - 3);
-        out.push_str("...");
-    }
-    out
+    let r = (status, [(header::CONTENT_TYPE, "text/plain")], msg.clone()).into_response();
+    registry_door::with_reason(r, &msg)
 }
 
 /// Maven's refusal, as [`registry_door::Refusal`] wants it.
@@ -479,43 +438,6 @@ fn declared_licence(pom: &[u8]) -> License {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Whatever sentence a refusal carries, the status line it becomes
-    /// is one line of printable ASCII: nothing in it can end the line
-    /// and start a header, and nothing arrives in Maven's log as
-    /// mojibake.
-    #[test]
-    fn a_reason_phrase_is_one_line_of_printable_ascii() {
-        assert_eq!(
-            reason_phrase("the licence gate — and a snapshot"),
-            "the licence gate - and a snapshot"
-        );
-        assert_eq!(
-            reason_phrase("x\r\nSet-Cookie: a=b"),
-            "x  Set-Cookie: a=b",
-            "a line break survived into the status line"
-        );
-        assert_eq!(reason_phrase("caf\u{e9}\ttab\u{0}nul"), "caf? tab nul");
-        assert_eq!(reason_phrase("‘a’ “b” c…"), "'a' \"b\" c.");
-
-        let long = reason_phrase(&"x".repeat(10_000));
-        assert_eq!(long.len(), MAX_REASON);
-        assert!(long.ends_with("..."));
-
-        // And hyper accepts every one of them as a reason phrase, so the
-        // sentence is never silently dropped for the standard one.
-        for s in [
-            "rita is a reader here, and a reader may not publish to this registry",
-            "1.0-SNAPSHOT is a snapshot — deploy a release version",
-            "a\r\nb",
-            "\u{1F600} emoji",
-        ] {
-            assert!(
-                hyper::ext::ReasonPhrase::try_from(reason_phrase(s)).is_ok(),
-                "{s:?}"
-            );
-        }
-    }
 
     /// The sentence reaches the response twice: in the status line,
     /// which is all Maven prints, and in the body, for everybody else.

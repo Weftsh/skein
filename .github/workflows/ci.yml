@@ -75,6 +75,14 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
+      # twine uploads what PyPA's `build` makes, built without isolation
+      # (setuptools installed here, not fetched mid-test), and pip
+      # installs it into a fresh virtualenv made by this Python.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: twine, build, setuptools
+        run: python -m pip install twine build setuptools
       - name: MinIO version
         id: minio
         run: echo "release=$(cat .minio-version)" >> "$GITHUB_OUTPUT"
@@ -89,7 +97,8 @@ jobs:
       # exists to prove each contract against the real thing.
       - name: Real clients against a real server
         env:
-          SKEIN_REQUIRE_CLIENTS: npm,python3,mvn
+          SKEIN_REQUIRE_CLIENTS: npm,python3,mvn,twine,pip
+          SKEIN_PYTHON: python
         run: cargo test -p skein-server --test clients_e2e -- --nocapture
 
   ui:

@@ -253,6 +253,7 @@ pub async fn read_artifact(state: &SharedState, digest: &str) -> Result<Option<V
 /// the container API at the host root?
 fn is_registry_path(path: &str) -> bool {
     path == "/v2"
+        || path == "/pypi"
         || ["/v2/", "/npm/", "/maven/", "/pypi/", "/cargo/"]
             .iter()
             .any(|p| path.starts_with(p))
@@ -316,9 +317,93 @@ pub async fn cache_layer(req: axum::extract::Request, next: axum::middleware::Ne
     res
 }
 
+/// The longest reason phrase a door writes. Every sentence of ours is
+/// shorter; the ceiling is for a filename or a version echoed back,
+/// which is somebody's input.
+pub const MAX_REASON: usize = 512;
+
+/// A refusal's sentence as a status line may carry it: one line of
+/// printable ASCII, or `None` when nothing is left to say.
+///
+/// Maven, twine and pip print the status line of a refusal and never its
+/// body, so the doors they talk to put the sentence there too — which is
+/// also where Nexus puts its reasons. Two things a naive phrase gets
+/// wrong. A CR or LF would end the status line and start a header —
+/// response splitting — so every control character and every line break
+/// becomes a space. And non-ASCII, though legal on the wire as
+/// `obs-text`, has no charset: Python's `http.client` and Maven both read
+/// it as Latin-1, so an em dash reaches the person as `â€”`. The few this
+/// code writes are spelled in ASCII; anything else is a `?`. A sentence
+/// cut at [`MAX_REASON`] says so with `...`.
+///
+/// One function for every door, because the Maven and PyPI ports each
+/// arrived with their own and they had already drifted: one turned a
+/// newline into a space, the other into `?`, and only one marked a cut.
+pub fn reason_phrase(msg: &str) -> Option<hyper::ext::ReasonPhrase> {
+    let mut out: String = msg
+        .trim()
+        .chars()
+        .map(|c| match c {
+            '\u{2014}' | '\u{2013}' => '-',
+            '\u{2018}' | '\u{2019}' => '\'',
+            '\u{201c}' | '\u{201d}' => '"',
+            '\u{2026}' => '.',
+            c if c.is_ascii_graphic() || c == ' ' => c,
+            c if c.is_whitespace() || c.is_control() => ' ',
+            _ => '?',
+        })
+        .collect();
+    if out.len() > MAX_REASON {
+        out.truncate(MAX_REASON - 3);
+        out.push_str("...");
+    }
+    if out.is_empty() {
+        return None;
+    }
+    hyper::ext::ReasonPhrase::try_from(out).ok()
+}
+
+/// `r`, with `msg` as its reason phrase when it can be one.
+pub fn with_reason(mut r: Response, msg: &str) -> Response {
+    if let Some(p) = reason_phrase(msg) {
+        r.extensions_mut().insert(p);
+    }
+    r
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Whatever a refusal says, its status line is one line of printable
+    /// ASCII: nothing in it can end the line and start a header, and
+    /// nothing reaches a build log as mojibake.
+    #[test]
+    fn a_reason_phrase_is_one_line_of_printable_ascii() {
+        let phrase =
+            |m: &str| reason_phrase(m).map(|p| String::from_utf8(p.as_bytes().to_vec()).unwrap());
+        assert_eq!(
+            phrase("rita is a reader here, and a reader may not publish to this registry")
+                .as_deref(),
+            Some("rita is a reader here, and a reader may not publish to this registry")
+        );
+        assert_eq!(
+            phrase("a \u{2014} b \u{201c}c\u{201d} \u{2018}d\u{2019} e\u{2026} caf\u{e9}")
+                .as_deref(),
+            Some("a - b \"c\" 'd' e. caf?")
+        );
+        assert_eq!(
+            phrase("line one\r\nSet-Cookie: a=b").as_deref(),
+            Some("line one  Set-Cookie: a=b"),
+            "a line break survived into the status line"
+        );
+        assert_eq!(phrase("tab\there\u{0}nul").as_deref(), Some("tab here nul"));
+        assert_eq!(phrase("   "), None);
+        assert_eq!(phrase("\u{1F600}").as_deref(), Some("?"));
+        let long = phrase(&"x".repeat(10_000)).unwrap();
+        assert_eq!(long.len(), MAX_REASON);
+        assert!(long.ends_with("..."), "a cut sentence does not say so");
+    }
 
     #[test]
     fn nothing_a_registry_door_answers_may_be_cached_by_an_edge() {
@@ -348,6 +433,7 @@ mod tests {
             "/npm/x",
             "/maven/a",
             "/pypi/simple/",
+            "/pypi",
             "/cargo/index/config.json",
         ] {
             assert!(is_registry_path(p), "{p}");

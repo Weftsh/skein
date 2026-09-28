@@ -15,8 +15,10 @@ skein-store.workspace = true
 skein-control.workspace = true
 skein-license.workspace = true
 axum = "0.7"
-# Only for `hyper::ext::ReasonPhrase`: Maven prints the status line of a
-# refusal and never its body, so the Maven door writes its sentence there.
+# Only for `hyper::ext::ReasonPhrase`: Maven, twine and pip show a person
+# the status line of a refusal and never its body, so those doors write
+# their sentence there. axum already builds hyper with `http1`; this only
+# names the type.
 hyper = { version = "1", default-features = false, features = ["http1"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "time", "sync"] }
 bytes = "1"
