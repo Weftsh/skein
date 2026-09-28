@@ -53,6 +53,25 @@ use skein_store::{ObjectStore, PutCond};
 /// beside each other.
 pub const MAX_ARTIFACT: usize = 128 * 1024 * 1024;
 
+/// How much of a large blob is resident at once, in and out.
+///
+/// 16 MiB is a compromise with two sides. Smaller means more objects,
+/// more rows and more round trips for one layer; larger means a bigger
+/// allocation per concurrent push, and a `docker push` of a
+/// twenty-layer image pushes several at once. A 500 MB layer is 32
+/// blocks at this size, which is a reasonable number of rows for one
+/// thing somebody downloads.
+pub const BLOCK: usize = 16 * 1024 * 1024;
+
+/// The largest blob the block path will assemble.
+///
+/// Not a storage limit — the store would take more — but a bound on how
+/// much one client can make this process do before it has proved
+/// anything. Without it, a single upload session could accumulate
+/// unbounded rows and objects that nothing yet references, and the only
+/// thing that would notice is the storage bill.
+pub const MAX_BLOB: i64 = 16 * 1024 * 1024 * 1024;
+
 /// Why a blob write was refused.
 #[derive(Debug)]
 pub enum BlobError {
@@ -130,6 +149,27 @@ pub fn put(
     Ok(got)
 }
 
+/// Store one block of a large blob, under its own digest.
+///
+/// The same key-space and the same content-addressing as an ordinary
+/// artifact, so a block shared by two blobs — a base layer two images
+/// both use — is written once and read by either.
+pub fn put_block(
+    store_url: &str,
+    prefix: &PackagePrefix,
+    body: &[u8],
+) -> Result<String, BlobError> {
+    if body.len() > BLOCK {
+        return Err(BlobError::TooLarge { size: body.len() });
+    }
+    let digest = digest_of(body);
+    let key = prefix.blob(&digest);
+    ObjectStore::new(store_url)
+        .put(&key, body, PutCond::None)
+        .map_err(|e| BlobError::Store(format!("package block put {key}: {e:?}")))?;
+    Ok(digest)
+}
+
 /// Read one artifact back whole.
 ///
 /// Single object or blocked, the caller does not say and cannot get it
@@ -139,6 +179,11 @@ pub fn put(
 pub fn get(store_url: &str, prefix: &PackagePrefix, digest: &str) -> Result<Vec<u8>, String> {
     let key = prefix.blob(digest);
     ObjectStore::new(store_url).get(&key)
+}
+
+/// Read one block back.
+pub fn get_block(store_url: &str, prefix: &PackagePrefix, block: &str) -> Result<Vec<u8>, String> {
+    get(store_url, prefix, block)
 }
 
 /// Delete one artifact. Idempotent, like every other delete against the
@@ -199,6 +244,28 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, BlobError::TooLarge { size } if size == MAX_ARTIFACT + 1));
+    }
+
+    /// A block is bounded too, and by a smaller number than an
+    /// artifact: the whole point of the block path is that nothing
+    /// bigger than one block is ever resident, so a caller that handed
+    /// it more would defeat it silently.
+    #[test]
+    fn an_oversized_block_is_refused_before_it_is_written() {
+        let org = skein_control::registry::Org {
+            id: "01ORG".into(),
+            name: "acme".into(),
+            created_at: 0,
+        };
+        // A store URL that could not answer: if the check were ordered
+        // after the write this would fail with a connection error.
+        let err = put_block(
+            "http://127.0.0.1:1",
+            &org.package_prefix(),
+            &vec![0u8; BLOCK + 1],
+        )
+        .unwrap_err();
+        assert!(matches!(err, BlobError::TooLarge { size } if size == BLOCK + 1));
     }
 
     /// Every refusal is a sentence somebody has to act on, so each says

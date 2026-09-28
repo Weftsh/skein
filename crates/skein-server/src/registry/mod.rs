@@ -9,6 +9,7 @@
 //! - `maven` — Maven's repository layout and its one generated document.
 //! - `pypi` — PyPI's simple index and twine's multipart upload.
 //! - `cargo` — Cargo's sparse index and its framed publish body.
+//! - `oci` — the OCI distribution protocol's paths and manifests.
 //! - `spdx`, `policy` — the admission policy: what may enter from an
 //!   upstream registry, decided per version.
 //! - `upstream` — fetching from a public registry, and the rules that
@@ -34,6 +35,7 @@ pub mod blobs;
 pub mod cargo;
 pub mod maven;
 pub mod npm;
+pub mod oci;
 pub mod policy;
 pub mod pypi;
 pub mod spdx;

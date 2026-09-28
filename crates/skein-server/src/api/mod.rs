@@ -6,6 +6,7 @@ pub mod cargo_api;
 pub mod license_api;
 pub mod maven_api;
 pub mod npm_api;
+pub mod oci_api;
 pub mod packages_api;
 pub mod people_api;
 pub mod pypi_api;
