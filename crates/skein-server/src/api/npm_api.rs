@@ -25,17 +25,18 @@
 //! nobody can use — so the distinction is [`crate::authx::Challenge`].
 
 use crate::api::internal;
-use crate::api::registry_door;
+use crate::api::{people_api, registry_door};
 use crate::app::SharedState;
 use crate::registry::{blobs, npm};
 use axum::body::Bytes;
-use axum::extract::{Path, State};
+use axum::extract::{ConnectInfo, Path, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use skein_control::auth::{Principal, Scope};
 use skein_control::packages::{self, Ecosystem, Package, PackageFile, PackageVersion, Provenance};
 use skein_control::registry::Org;
+use std::net::SocketAddr;
 
 /// The body limit for a publish. An npm publish carries its tarball
 /// base64-encoded, which is four bytes on the wire for every three
@@ -339,7 +340,17 @@ const COUCH_USER: &str = "-/user/org.couchdb.user:";
 /// credential written into a file by a package manager is the one most
 /// likely to be copied somewhere it should not be, and it has no use for
 /// administering the registry.
-async fn couch_login(state: SharedState, url_user: String, body: Bytes) -> Response {
+///
+/// The password goes through the same throttle as the UI's sign-in
+/// (`people_api::check_password`), on the same counters: a guesser gains
+/// nothing by moving between the two.
+async fn couch_login(
+    state: SharedState,
+    peer: SocketAddr,
+    headers: &HeaderMap,
+    url_user: String,
+    body: Bytes,
+) -> Response {
     match packages::ecosystem_policy(&state.db, &state.org().id, Ecosystem::Npm) {
         Ok(p) if p.enabled() => {}
         Ok(_) => return npm_error(StatusCode::NOT_FOUND, "npm is not switched on here"),
@@ -360,10 +371,18 @@ async fn couch_login(state: SharedState, url_user: String, body: Bytes) -> Respo
             "the name in the URL and the body differ",
         );
     }
-    let user = match skein_control::users::authenticate(&state.db, name, password) {
+    let checked = people_api::check_password(
+        &state,
+        peer,
+        headers,
+        people_api::PasswordDoor::NpmLogin,
+        name,
+        password,
+    );
+    let user = match checked {
         Ok(Some(u)) => u,
         Ok(None) => return npm_error(StatusCode::UNAUTHORIZED, "invalid username or password"),
-        Err(e) => return internal(e),
+        Err(r) => return r,
     };
     let scope = if user.role == skein_control::users::Role::Reader {
         Scope::PackageRead
@@ -434,13 +453,14 @@ pub async fn delete(
 /// `PUT /npm/*path` — publish one version, or `npm login`.
 pub async fn put(
     State(state): State<SharedState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Path(path): Path<String>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
     if let Some(user) = path.trim_matches('/').strip_prefix(COUCH_USER) {
         let user = npm::decode_name(user);
-        return couch_login(state, user, body).await;
+        return couch_login(state, peer, &headers, user, body).await;
     }
     let (org, principal) = match open(&state, &headers, Scope::PackageWrite) {
         Ok(x) => x,

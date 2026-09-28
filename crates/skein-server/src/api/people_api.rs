@@ -9,7 +9,8 @@
 use crate::api::{audit, internal, json_error};
 use crate::app::SharedState;
 use crate::authx::{self, Challenge};
-use axum::extract::{Path, Query, State};
+use crate::throttle::{Key, Lockout, Refusal};
+use axum::extract::{ConnectInfo, Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -18,6 +19,8 @@ use skein_control::auth::{self, Principal, Scope};
 use skein_control::users::{self, ChangeError, Role, User};
 use skein_control::{packages, sessions};
 use std::collections::HashMap;
+use std::net::SocketAddr;
+use std::time::Instant;
 
 fn user_json(u: &User) -> serde_json::Value {
     serde_json::json!({
@@ -78,6 +81,105 @@ fn cookie(state: &SharedState, value: &str, ttl_secs: i64) -> String {
     )
 }
 
+/// Where a password is being checked, for the audit entry a lockout
+/// writes.
+#[derive(Clone, Copy)]
+pub enum PasswordDoor {
+    SignIn,
+    NpmLogin,
+    PasswordChange,
+}
+
+impl PasswordDoor {
+    fn as_str(self) -> &'static str {
+        match self {
+            PasswordDoor::SignIn => "sign-in",
+            PasswordDoor::NpmLogin => "npm login",
+            PasswordDoor::PasswordChange => "password change",
+        }
+    }
+}
+
+/// Check a username and password, through the sign-in throttle.
+///
+/// The only way any door checks a password, so every door counts on the
+/// same name and address — see [`crate::throttle`]. `Ok(None)` is a
+/// wrong password, whatever the reason, and each door answers it in its
+/// own words; `Err` is the throttle's 429, or a 500.
+pub fn check_password(
+    state: &SharedState,
+    peer: SocketAddr,
+    headers: &HeaderMap,
+    door: PasswordDoor,
+    username: &str,
+    password: &str,
+) -> Result<Option<User>, Response> {
+    // The last line: a proxy that appends a line of its own rather than
+    // extending the client's puts its entry there.
+    let forwarded_for = headers
+        .get_all("x-forwarded-for")
+        .iter()
+        .next_back()
+        .map(|v| v.as_bytes());
+    let address = state
+        .sign_ins
+        .policy()
+        .client_address(peer.ip(), forwarded_for);
+    // The name first: somebody who mistyped their own password should
+    // hear about their name, not about the address they share.
+    let keys = [Key::name(username), Key::address(address)];
+    if let Err(refused) = state.sign_ins.admit(&keys, Instant::now()) {
+        return Err(too_many(&refused));
+    }
+    match users::authenticate(&state.db, username, password) {
+        Ok(Some(u)) => {
+            state.sign_ins.succeeded(&keys);
+            Ok(Some(u))
+        }
+        Ok(None) => {
+            for lock in state.sign_ins.failed(&keys, Instant::now()) {
+                audit_lockout(state, door, &lock);
+            }
+            Ok(None)
+        }
+        Err(e) => {
+            state.sign_ins.release(&keys);
+            Err(internal(e))
+        }
+    }
+}
+
+/// The throttle's refusal: 429, when to come back, and a sentence the UI
+/// and npm both print.
+fn too_many(r: &Refusal) -> Response {
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        [(header::RETRY_AFTER, r.retry_after_secs().to_string())],
+        Json(serde_json::json!({ "error": r.sentence() })),
+    )
+        .into_response()
+}
+
+/// One entry per lock, so an admin can see an attack without a row per
+/// refused guess. Nobody authenticated, so the principal is the server.
+fn audit_lockout(state: &SharedState, door: PasswordDoor, lock: &Lockout) {
+    let mut context = serde_json::json!({
+        "door": door.as_str(),
+        "failures": lock.failures,
+        "locked_for_secs": crate::throttle::whole_secs(lock.locked_for),
+    });
+    match &lock.key {
+        Key::Name(n) => context["username"] = serde_json::json!(n),
+        Key::Address(a) => context["address"] = serde_json::json!(Key::address_text(a)),
+    }
+    let ctx = skein_control::audit::AuditCtx::system(&state.org().id, "sign-in");
+    if let Err(e) =
+        skein_control::audit::record(&state.db, &ctx, "session.throttled", Some(&context))
+    {
+        eprintln!("skein: audit session.throttled: {e}");
+    }
+}
+
 #[derive(Deserialize)]
 pub struct LoginBody {
     pub username: String,
@@ -85,14 +187,27 @@ pub struct LoginBody {
 }
 
 /// `POST /api/v1/session` — sign in.
-pub async fn login(State(state): State<SharedState>, Json(body): Json<LoginBody>) -> Response {
-    let user = match users::authenticate(&state.db, &body.username, &body.password) {
+pub async fn login(
+    State(state): State<SharedState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(body): Json<LoginBody>,
+) -> Response {
+    let checked = check_password(
+        &state,
+        peer,
+        &headers,
+        PasswordDoor::SignIn,
+        &body.username,
+        &body.password,
+    );
+    let user = match checked {
         Ok(Some(u)) => u,
         // One answer for every failure — unknown name, wrong password,
         // disabled account, a service account with no password — so this
         // cannot be used to discover who has an account.
         Ok(None) => return json_error(StatusCode::UNAUTHORIZED, "invalid username or password"),
-        Err(e) => return internal(e),
+        Err(r) => return r,
     };
     let (_, token) = match sessions::create(&state.db, &user.id, sessions::DEFAULT_TTL_SECS) {
         Ok(x) => x,
@@ -186,8 +301,13 @@ pub struct PasswordBody {
 /// `PUT /api/v1/me/password` — change your own password. Every session
 /// but the one asking is signed out: a password change is what somebody
 /// does when they think another session is not theirs.
+///
+/// The current password is checked through the throttle like a sign-in:
+/// it is the same Argon2, and somebody holding a stolen session could
+/// otherwise guess it at full speed.
 pub async fn change_password(
     State(state): State<SharedState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Json(body): Json<PasswordBody>,
 ) -> Response {
@@ -195,10 +315,18 @@ pub async fn change_password(
         Ok(p) => p,
         Err(r) => return r,
     };
-    match users::authenticate(&state.db, &p.username, &body.current) {
+    let checked = check_password(
+        &state,
+        peer,
+        &headers,
+        PasswordDoor::PasswordChange,
+        &p.username,
+        &body.current,
+    );
+    match checked {
         Ok(Some(_)) => {}
         Ok(None) => return json_error(StatusCode::FORBIDDEN, "the current password is wrong"),
-        Err(e) => return internal(e),
+        Err(r) => return r,
     }
     if let Err(e) = users::set_password(&state.db, &p.user_id, &body.new) {
         return json_error(StatusCode::BAD_REQUEST, e);

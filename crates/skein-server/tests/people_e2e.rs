@@ -786,3 +786,354 @@ fn a_refusal_names_what_was_attempted() {
     );
     assert!(server.healthy());
 }
+
+// ------------------------------------------------------ sign-in throttle
+
+/// `Retry-After` on a throttled sign-in, as seconds, checked to be a
+/// number inside the window.
+fn retry_after(r: &skein_testkit::Reply) -> u64 {
+    let v = r
+        .header("retry-after")
+        .unwrap_or_else(|| panic!("a 429 without Retry-After: {}", r.text()));
+    let secs: u64 = v
+        .parse()
+        .unwrap_or_else(|_| panic!("Retry-After is not seconds: {v:?}"));
+    assert!(
+        (1..=900).contains(&secs),
+        "Retry-After {secs} is outside the 15-minute window"
+    );
+    secs
+}
+
+/// Assert `r` is the throttle's refusal `who` (`for ada`, `from
+/// 127.0.0.1`), naming the same wait as its `Retry-After`, and that it
+/// signed nobody in.
+fn assert_throttled(r: &skein_testkit::Reply, who: &str) {
+    assert_eq!(r.status, 429, "{who}: {}", r.text());
+    let secs = retry_after(r);
+    let unit = if secs == 1 { "second" } else { "seconds" };
+    assert_eq!(
+        r.json()["error"],
+        format!("too many failed sign-ins {who}; try again in {secs} {unit}"),
+        "{}",
+        r.text()
+    );
+    assert!(r.header("set-cookie").is_none(), "a refusal set a cookie");
+}
+
+/// `npm login`'s CouchDB exchange, as npm sends it.
+fn npm_login(server: &Server, name: &str, password: &str) -> skein_testkit::Reply {
+    server.raw(
+        "PUT",
+        &format!("/npm/-/user/org.couchdb.user:{name}"),
+        &[("Content-Type", "application/json")],
+        Some(
+            serde_json::json!({
+                "_id": format!("org.couchdb.user:{name}"),
+                "name": name,
+                "password": password,
+                "type": "user",
+            })
+            .to_string()
+            .as_bytes(),
+        ),
+    )
+}
+
+/// A sign-in from `xff`, if given, as a proxy would forward it.
+fn login_via(
+    server: &Server,
+    xff: Option<&str>,
+    username: &str,
+    password: &str,
+) -> skein_testkit::Reply {
+    let mut h = vec![("Content-Type", "application/json"), ("x-skein-csrf", "1")];
+    if let Some(x) = xff {
+        h.push(("X-Forwarded-For", x));
+    }
+    server.raw(
+        "POST",
+        "/api/v1/session",
+        &h,
+        Some(
+            serde_json::json!({ "username": username, "password": password })
+                .to_string()
+                .as_bytes(),
+        ),
+    )
+}
+
+/// Add a person who can sign in, and hand back an API token of theirs.
+fn with_password(server: &Server, admin: &str, username: &str, password: &str) -> String {
+    let (s, u) = server.req(
+        "POST",
+        "/api/v1/users",
+        admin,
+        Some(
+            serde_json::json!({ "username": username, "role": "publisher", "password": password }),
+        ),
+    );
+    assert_eq!(s, 201, "create {username}: {u}");
+    let (s, t) = server.req(
+        "POST",
+        &format!("/api/v1/users/{}/tokens", u["id"].as_str().unwrap()),
+        admin,
+        Some(serde_json::json!({ "label": "ci", "scopes": ["package:read"] })),
+    );
+    assert_eq!(s, 201, "token for {username}: {t}");
+    t["token"].as_str().unwrap().to_string()
+}
+
+/// The `session.throttled` entries in the audit log, newest first.
+fn lockouts(server: &Server, admin: &str) -> Vec<serde_json::Value> {
+    let (status, log) = server.get("/api/v1/audit", admin);
+    assert_eq!(status, 200, "{log}");
+    log["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["action"] == "session.throttled")
+        .map(|e| e["context"].clone())
+        .collect()
+}
+
+const ADA_PW: &str = "ada's long password";
+const BOB_PW: &str = "bob's long password";
+
+/// Password sign-in is throttled by name. Each attempt costs an Argon2
+/// hash, so without this anybody who can reach the sign-in form can
+/// guess passwords at full speed and burn the server's CPU doing it.
+///
+/// Five wrong passwords for a name in fifteen minutes, and the next
+/// attempt is refused **before** the password is looked at — the right
+/// one included, which is the point: a guesser who lands on it while
+/// locked must not be told. A name nobody holds locks the same way and
+/// answers in the same words, so the lock says nothing about who has an
+/// account. Both doors that take a password share one counter, so a
+/// guesser cannot split their attempts between the UI and `npm login`.
+/// A lockout is audited once, not once per refusal, and tokens — what
+/// CI and every package manager use — are not touched by it.
+#[test]
+fn failed_sign_ins_lock_a_name_on_every_password_door() {
+    let bucket = Minio::shared().bucket("people-throttle");
+    let server = spawn(&bucket.base_url, "people-throttle");
+    let admin = server.bootstrap("acme");
+    let ada_token = with_password(&server, &admin, "ada", ADA_PW);
+    with_password(&server, &admin, "bob", BOB_PW);
+    with_password(&server, &admin, "carol", "carol's long password");
+    // Every failure here is also one for 127.0.0.1, and twenty lock the
+    // address: this test spends fifteen. A case added here that takes
+    // it to twenty is testing the address limit, not the name.
+
+    // Five ordinary refusals…
+    for _ in 0..5 {
+        let r = login(&server, "ada", "not ada's password");
+        assert_eq!(r.status, 401, "{}", r.text());
+        assert_eq!(r.json()["error"], "invalid username or password");
+    }
+    // …and then nothing is checked: a wrong password and the right one
+    // get the same refusal, however the name is spelled, on either door.
+    // Refusals do not count, so they do not stretch the lock either.
+    for (name, pw) in [
+        ("ada", "not ada's password"),
+        ("ada", ADA_PW),
+        ("ADA", ADA_PW),
+        (" Ada ", ADA_PW),
+    ] {
+        assert_throttled(&login(&server, name, pw), "for ada");
+    }
+    assert_throttled(&npm_login(&server, "ada", ADA_PW), "for ada");
+
+    // Somebody else signs in as usual, and ada's token still works.
+    assert_eq!(login(&server, "bob", BOB_PW).status, 200);
+    assert_eq!(server.get("/api/v1/me", &ada_token).0, 200);
+
+    // A name nobody holds: the same five refusals, the same lock, the
+    // same words.
+    for _ in 0..5 {
+        let r = login(&server, "nobody", ADA_PW);
+        assert_eq!(r.status, 401, "{}", r.text());
+        assert_eq!(r.json()["error"], "invalid username or password");
+    }
+    assert_throttled(&login(&server, "nobody", ADA_PW), "for nobody");
+    assert_throttled(&npm_login(&server, "nobody", ADA_PW), "for nobody");
+
+    // One counter across both doors: failures on either count on both.
+    for door in ["ui", "npm", "ui", "npm", "npm"] {
+        let r = match door {
+            "ui" => login(&server, "carol", "a wrong password!!"),
+            _ => npm_login(&server, "carol", "a wrong password!!"),
+        };
+        assert_eq!(r.status, 401, "carol via {door}: {}", r.text());
+    }
+    assert_throttled(
+        &login(&server, "carol", "carol's long password"),
+        "for carol",
+    );
+    assert_throttled(
+        &npm_login(&server, "carol", "carol's long password"),
+        "for carol",
+    );
+
+    // One audit entry per lockout, not one per refusal, and no password
+    // in any of them.
+    let locked = lockouts(&server, &admin);
+    let mut names: Vec<&str> = locked
+        .iter()
+        .map(|c| c["username"].as_str().unwrap_or("?"))
+        .collect();
+    names.sort();
+    assert_eq!(names, ["ada", "carol", "nobody"], "{locked:?}");
+    assert!(locked.iter().all(|c| c["failures"] == 5), "{locked:?}");
+    let (_, log) = server.get("/api/v1/audit", &admin);
+    assert!(!log.to_string().contains(ADA_PW), "a password was audited");
+
+    // The storm left the server serving, and an untouched person signs in.
+    assert!(server.healthy());
+    let r = login(&server, "bob", BOB_PW);
+    assert_eq!(r.status, 200, "{}", r.text());
+    assert_eq!(r.json()["username"], "bob");
+}
+
+/// Guesses sent all at once get no more tries than guesses sent one by
+/// one. A limiter that checks the count, runs Argon2, and only then
+/// records the failure admits every request that arrives while the
+/// first few are still hashing — as many free guesses as the server can
+/// hash in parallel. An attempt is counted when it is let in.
+#[test]
+fn guesses_sent_at_once_get_no_more_tries_than_guesses_sent_in_turn() {
+    let bucket = Minio::shared().bucket("people-throttle");
+    let server = spawn(&bucket.base_url, "people-throttle-burst");
+    let admin = server.bootstrap("acme");
+    with_password(&server, &admin, "ada", ADA_PW);
+    let gate = std::sync::Barrier::new(16);
+    let statuses: Vec<u16> = std::thread::scope(|s| {
+        let handles: Vec<_> = (0..16)
+            .map(|i| {
+                let (server, gate) = (&server, &gate);
+                s.spawn(move || {
+                    gate.wait();
+                    login(server, "ada", &format!("guess number {i:02}")).status
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    let checked = statuses.iter().filter(|s| **s == 401).count();
+    let refused = statuses.iter().filter(|s| **s == 429).count();
+    assert_eq!(
+        (checked, refused),
+        (5, 11),
+        "sixteen guesses at once: {statuses:?}"
+    );
+    let locked = lockouts(&server, &admin);
+    assert_eq!(locked.len(), 1, "one lockout, one entry: {locked:?}");
+    assert_eq!(locked[0]["username"], "ada", "{locked:?}");
+    assert!(server.healthy());
+    assert_eq!(server.get("/api/v1/me", &admin).0, 200);
+}
+
+/// Changing your password checks the current one — the same Argon2, and
+/// a guess somebody holding a stolen session could otherwise make at
+/// full speed. It counts on the same name as signing in.
+#[test]
+fn a_wrong_current_password_counts_towards_the_lock() {
+    let bucket = Minio::shared().bucket("people-throttle");
+    let server = spawn(&bucket.base_url, "people-throttle-pw");
+    let admin = server.bootstrap("acme");
+    with_password(&server, &admin, "ada", ADA_PW);
+    let r = login(&server, "ada", ADA_PW);
+    assert_eq!(r.status, 200, "{}", r.text());
+    let cookie = session_cookie(&r);
+    let change = |current: &str| {
+        server.raw(
+            "PUT",
+            "/api/v1/me/password",
+            &[
+                ("Cookie", cookie.as_str()),
+                ("Content-Type", "application/json"),
+                ("x-skein-csrf", "1"),
+            ],
+            Some(
+                serde_json::json!({ "current": current, "new": "a brand new password" })
+                    .to_string()
+                    .as_bytes(),
+            ),
+        )
+    };
+    for _ in 0..5 {
+        let r = change("not ada's password");
+        assert_eq!(r.status, 403, "{}", r.text());
+        assert_eq!(r.json()["error"], "the current password is wrong");
+    }
+    assert_throttled(&change(ADA_PW), "for ada");
+    assert_throttled(&login(&server, "ada", ADA_PW), "for ada");
+    // The lock refuses password checks; it does not end the session.
+    let me = server.raw("GET", "/api/v1/me", &[("Cookie", cookie.as_str())], None);
+    assert_eq!(me.status, 200, "{}", me.text());
+    assert!(server.healthy());
+}
+
+/// The address limit catches the other shape of guessing: one password
+/// tried against many names. By default the address is the TCP peer's,
+/// and an `X-Forwarded-For` a client wrote itself is ignored — or an
+/// attacker could spread their attempts over as many made-up addresses
+/// as they liked.
+#[test]
+fn the_address_limit_counts_the_peer_and_ignores_a_forged_forwarded_for() {
+    let bucket = Minio::shared().bucket("people-throttle");
+    let server = spawn(&bucket.base_url, "people-throttle-peer");
+    let admin = server.bootstrap("acme");
+    with_password(&server, &admin, "ada", ADA_PW);
+    // Twenty names, each tried once, each "from" a different address.
+    for i in 0..20 {
+        let xff = format!("203.0.113.{i}");
+        let r = login_via(&server, Some(&xff), &format!("guess{i}"), ADA_PW);
+        assert_eq!(r.status, 401, "attempt {i}: {}", r.text());
+    }
+    // The peer is what was counted: the next sign-in from it is refused,
+    // whoever it names and wherever it claims to come from.
+    assert_throttled(
+        &login_via(&server, Some("198.51.100.1"), "ada", ADA_PW),
+        "from 127.0.0.1",
+    );
+    assert_throttled(&npm_login(&server, "ada", ADA_PW), "from 127.0.0.1");
+    let locked = lockouts(&server, &admin);
+    assert_eq!(locked.len(), 1, "{locked:?}");
+    assert_eq!(locked[0]["address"], "127.0.0.1", "{locked:?}");
+    assert_eq!(locked[0]["failures"], 20, "{locked:?}");
+    assert!(server.healthy());
+    assert_eq!(server.get("/api/v1/me", &admin).0, 200);
+}
+
+/// Behind a reverse proxy every request arrives from the proxy, so the
+/// operator says so with `SKEIN_TRUST_PROXY_HEADERS=true`, and the
+/// address is the **right-most** `X-Forwarded-For` entry: the one the
+/// proxy appended. Everything to its left the client wrote, and changing
+/// it buys nothing.
+#[test]
+fn behind_a_trusted_proxy_the_address_is_the_one_the_proxy_appended() {
+    let bucket = Minio::shared().bucket("people-throttle");
+    let server = Server::builder(env!("CARGO_BIN_EXE_skein"), &bucket.base_url)
+        .db_hint("people-throttle-proxy")
+        .env("SKEIN_TRUST_PROXY_HEADERS", "true")
+        .start();
+    let admin = server.bootstrap("acme");
+    with_password(&server, &admin, "ada", ADA_PW);
+    for i in 0..20 {
+        let xff = format!("10.0.{i}.1, 192.0.2.{i}, 198.51.100.7");
+        let r = login_via(&server, Some(&xff), &format!("guess{i}"), ADA_PW);
+        assert_eq!(r.status, 401, "attempt {i}: {}", r.text());
+    }
+    assert_throttled(
+        &login_via(&server, Some("10.9.9.9, 198.51.100.7"), "ada", ADA_PW),
+        "from 198.51.100.7",
+    );
+    // Another client of the same proxy is untouched, and so is a
+    // request that reached Skein without passing through it.
+    let r = login_via(&server, Some("198.51.100.8"), "ada", ADA_PW);
+    assert_eq!(r.status, 200, "{}", r.text());
+    let r = login_via(&server, None, "ada", ADA_PW);
+    assert_eq!(r.status, 200, "{}", r.text());
+    assert!(server.healthy());
+}
