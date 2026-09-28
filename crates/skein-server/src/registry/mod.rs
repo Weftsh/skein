@@ -6,6 +6,7 @@
 //!
 //! - `blobs` — bytes in the object store, content-addressed and verified.
 //! - `npm` — the npm registry protocol, translated to the control plane.
+//! - `oci` — the OCI distribution protocol's paths and manifests.
 //! - `spdx`, `policy` — the admission policy: what may enter from an
 //!   upstream registry, decided per version.
 //! - `upstream` — fetching from a public registry, and the rules that
@@ -29,6 +30,7 @@
 
 pub mod blobs;
 pub mod npm;
+pub mod oci;
 pub mod policy;
 pub mod spdx;
 pub mod upstream;

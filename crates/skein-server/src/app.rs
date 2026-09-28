@@ -10,7 +10,7 @@
 //! organization exists. From then on it is read once and kept: its id is
 //! the store prefix, and ids do not change.
 
-use crate::api::{npm_api, packages_api, people_api, registry_door};
+use crate::api::{npm_api, oci_api, packages_api, people_api, registry_door};
 use axum::extract::{Request, State};
 use axum::http::{header, HeaderValue, Method, StatusCode};
 use axum::middleware::{self, Next};
@@ -87,7 +87,7 @@ impl AppState {
 /// here would answer 404 for everything, which reads as a broken
 /// registry rather than a missing feature.
 pub fn served(eco: Ecosystem) -> bool {
-    matches!(eco, Ecosystem::Npm)
+    matches!(eco, Ecosystem::Npm | Ecosystem::Oci)
 }
 
 pub fn router(state: SharedState) -> Router {
@@ -163,6 +163,33 @@ pub fn router(state: SharedState) -> Router {
                 .layer(axum::extract::DefaultBodyLimit::max(
                     npm_api::PUBLISH_BODY_LIMIT,
                 )),
+        )
+        // The OCI distribution API, which **cannot** live under a prefix.
+        // A container client parses `host/path/image` as registry `host`
+        // and repository `path/image` and then talks to
+        // `https://host/v2/…`; there is nowhere to put a base path. So
+        // `/v2/` is a reserved top-level segment, and the repository is
+        // the whole path after it.
+        //
+        // One wildcard and one root, because a repository name contains
+        // slashes and the markers that end it (`/blobs/`, `/manifests/`)
+        // are found from the right — see `registry::oci::parse_path`.
+        //
+        // **No body limit.** A layer arrives as one request body and is
+        // read as a stream straight into blocks; a limit here would cap
+        // an image at whatever number somebody wrote, and the failure
+        // would be a push that dies part-way with no explanation. The
+        // blob ceiling is `blobs::MAX_BLOB`, counted as the body streams.
+        .route("/v2/", get(oci_api::root))
+        .route(
+            "/v2/*path",
+            get(oci_api::any)
+                .head(oci_api::any)
+                .post(oci_api::any)
+                .put(oci_api::any)
+                .patch(oci_api::any)
+                .delete(oci_api::any)
+                .layer(axum::extract::DefaultBodyLimit::disable()),
         )
         .nest("/api/v1", api)
         .layer(middleware::from_fn_with_state(state.clone(), setup_layer))

@@ -3,6 +3,7 @@
 //! scripts use.
 
 pub mod npm_api;
+pub mod oci_api;
 pub mod packages_api;
 pub mod people_api;
 pub mod registry_door;

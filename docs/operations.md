@@ -28,6 +28,11 @@ Skein serves plain HTTP. Put TLS in front of it — a load balancer, or a
 reverse proxy such as Caddy or nginx — and set `SKEIN_PUBLIC_URL` to the
 `https://` address people use.
 
+Container images need two more things: Skein at the **root** of its own
+host name, because a container client has nowhere to put a base path,
+and a proxy that lets a multi-gigabyte request body through. See
+[containers.md](containers.md).
+
 ## Setting up
 
 ```sh
