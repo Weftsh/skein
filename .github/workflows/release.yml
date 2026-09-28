@@ -120,6 +120,13 @@ jobs:
             gzip "artifacts/skein-image-$TAG-linux-$arch.tar"
           done
           (cd artifacts && sha256sum skein-image-*.tar.gz >> SHA256SUMS && cat SHA256SUMS)
+      # Compose files pinned to this image, for an install with no source:
+      # the image job's smoke test runs the stack from this same bundle.
+      - name: Compose bundle
+        run: |
+          image=ghcr.io/$(echo "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')
+          scripts/bundle.sh "$TAG" artifacts "$image:${TAG#v}"
+          (cd artifacts && sha256sum "skein-compose-$TAG.tar.gz" >> SHA256SUMS && cat SHA256SUMS)
       - name: Create the release
         env:
           GH_TOKEN: ${{ github.token }}

@@ -4,6 +4,10 @@
 #   docker compose up -d --build --wait
 #   docker compose exec skein skein admin bootstrap --org <your-org>
 #
+# In a checkout this builds the image from the source beside it; the
+# copy in a release's skein-compose-<version>.tar.gz runs that release's
+# published image instead, with nothing to build (scripts/bundle.sh).
+#
 # then open http://localhost:8080 and sign in with the password it
 # printed. The passwords have no defaults on purpose: a stack that comes
 # up with a password everybody can read in this file is one that ships
@@ -14,7 +18,7 @@
 services:
   skein:
     build: .
-    image: skein:local
+    image: ${SKEIN_IMAGE:-skein:local}
     restart: unless-stopped
     ports:
       - "8080:8080"

@@ -451,6 +451,10 @@ pub(crate) const MIGRATIONS: &[&str] = &[
 pub(crate) struct Connector {
     config: postgres::Config,
     tls: Option<MakeRustlsConnect>,
+    /// Where a CA this connection cannot trust goes: `sslrootcert`
+    /// replaces `SKEIN_CA_FILE` for the database, so an error naming the
+    /// variable would send the operator to a file nothing reads.
+    ca_remedy: &'static str,
 }
 
 /// The TLS settings a URL carries, taken out of it: the `postgres` crate
@@ -534,7 +538,11 @@ impl Connector {
         let verify_host = match mode.as_deref() {
             None | Some("disable" | "allow" | "prefer") => {
                 config.ssl_mode(postgres::config::SslMode::Disable);
-                return Ok(Connector { config, tls: None });
+                return Ok(Connector {
+                    config,
+                    tls: None,
+                    ca_remedy: "",
+                });
             }
             Some("require" | "verify-full") => true,
             Some("verify-ca") => false,
@@ -545,17 +553,22 @@ impl Connector {
                 ))
             }
         };
-        let roots = match root.as_deref() {
-            None | Some("system") => skein_tls::roots_from_env()?,
-            Some(path) => {
-                skein_tls::roots_only(Path::new(path)).map_err(|e| format!("sslrootcert: {e}"))?
-            }
+        let (roots, ca_remedy) = match root.as_deref() {
+            None | Some("system") => (
+                skein_tls::roots_from_env()?,
+                "SKEIN_CA_FILE=/path/to/ca.pem (or sslrootcert=/path/to/ca.pem in SKEIN_DB_URL)",
+            ),
+            Some(path) => (
+                skein_tls::roots_only(Path::new(path)).map_err(|e| format!("sslrootcert: {e}"))?,
+                "sslrootcert=/path/to/ca.pem in SKEIN_DB_URL (the file it names now does not hold that CA)",
+            ),
         };
         let tls = skein_tls::client_config(roots, verify_host)?;
         config.ssl_mode(postgres::config::SslMode::Require);
         Ok(Connector {
             config,
             tls: Some(MakeRustlsConnect::new(tls)),
+            ca_remedy,
         })
     }
 
@@ -570,7 +583,7 @@ impl Connector {
 /// A connection error with its causes: `postgres` says "error performing
 /// TLS handshake" and keeps *why* — an unknown issuer, a name mismatch —
 /// in its source chain, which is the only part anybody can act on.
-fn connect_error(e: &postgres::Error) -> String {
+fn connect_error(e: &postgres::Error, ca_remedy: &str) -> String {
     let mut out = e.to_string();
     let mut source = std::error::Error::source(e);
     while let Some(cause) = source {
@@ -587,7 +600,7 @@ fn connect_error(e: &postgres::Error) -> String {
              private CA) to SKEIN_DB_URL",
         );
     }
-    skein_tls::hint(&out)
+    skein_tls::hint_to(&out, ca_remedy)
 }
 
 /// The sync `postgres` client drives its own internal runtime with
@@ -728,9 +741,12 @@ impl ControlDb {
     pub fn open(url: &str) -> Result<ControlDb, String> {
         run(|| {
             let connector = Connector::from_url(url)?;
-            let mut conn = connector
-                .connect()
-                .map_err(|e| format!("connect control db: {}", connect_error(&e)))?;
+            let mut conn = connector.connect().map_err(|e| {
+                format!(
+                    "connect control db: {}",
+                    connect_error(&e, connector.ca_remedy)
+                )
+            })?;
             let lock_ms = std::env::var("SKEIN_DB_LOCK_TIMEOUT_MS")
                 .ok()
                 .and_then(|v| v.parse::<u64>().ok())
@@ -955,6 +971,28 @@ mod tests {
             "{err}"
         );
         ControlDb::open(&format!("{url}?sslmode=verify-ca&sslrootcert={ca}")).unwrap();
+
+        // verify-ca forgives the name and nothing else: a chain from a CA
+        // it was not given is refused, named or not. `ChainOnly` is a
+        // verifier we wrote; one arm too broad and it would accept any
+        // certificate at all while every case above stayed green.
+        let stranger = skein_testkit::pki::Pki::new();
+        let theirs = stranger.ca_pem.display().to_string();
+        for q in [
+            format!("sslmode=verify-ca&sslrootcert={theirs}"),
+            "sslmode=verify-ca".to_string(),
+        ] {
+            let err = ControlDb::open(&format!("{url}?{q}"))
+                .err()
+                .unwrap_or_else(|| panic!("{q}: a chain from an unknown CA was accepted"));
+            // Refused, and told where the right CA goes: the same-named
+            // stranger is a CA re-issued under its old name, which rustls
+            // reports as a bad signature rather than an unknown issuer.
+            assert!(
+                err.contains("invalid peer certificate") && err.contains("sslrootcert"),
+                "{q}: {err}"
+            );
+        }
 
         // An sslmode nobody supports is refused by name, not guessed at.
         let err = ControlDb::open(&format!("{url}?sslmode=verify_full"))

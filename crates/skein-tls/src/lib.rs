@@ -151,13 +151,29 @@ pub fn agent() -> ureq::AgentBuilder {
 }
 
 /// What a TLS failure should tell the person reading it, appended to the
-/// error: an unknown issuer is almost always an operator's own CA that
-/// nothing told Skein about.
+/// error: a certificate Skein cannot trust is almost always from an
+/// operator's own CA that nothing told Skein about.
 pub fn hint(error: &str) -> String {
+    hint_to(error, &format!("{CA_FILE_ENV}=/path/to/ca.pem"))
+}
+
+/// [`hint`], naming where the CA goes for this connection — `sslrootcert`
+/// for a database URL that carries one, which trusts that file and not
+/// `SKEIN_CA_FILE`.
+pub fn hint_to(error: &str, remedy: &str) -> String {
     if error.contains("UnknownIssuer") || error.contains("unknown issuer") {
         format!(
             "{error} — if this server's certificate comes from your own CA, give Skein that CA \
-             with {CA_FILE_ENV}=/path/to/ca.pem"
+             with {remedy}"
+        )
+    } else if error.contains("BadSignature") {
+        // The issuer's *name* matched a CA Skein trusts and its key did
+        // not: a CA re-issued under the same name, with the old one still
+        // configured.
+        format!(
+            "{error} — the certificate names a CA Skein trusts, but a different key signed it: \
+             usually that CA was re-issued under the same name; give Skein the current one with \
+             {remedy}"
         )
     } else {
         error.to_string()
@@ -266,5 +282,9 @@ mod tests {
         let h = hint("invalid peer certificate: UnknownIssuer");
         assert!(h.contains(CA_FILE_ENV), "{h}");
         assert_eq!(hint("connection refused"), "connection refused");
+        let h = hint("invalid peer certificate: BadSignature");
+        assert!(h.contains("re-issued") && h.contains(CA_FILE_ENV), "{h}");
+        let h = hint_to("invalid peer certificate: UnknownIssuer", "sslrootcert=…");
+        assert!(h.contains("sslrootcert") && !h.contains(CA_FILE_ENV), "{h}");
     }
 }

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Prove the image works: build it, bring up compose.yml, bootstrap, and
+# Prove the image works: build it, bring up the Compose stack from the
+# release bundle a customer unpacks (scripts/bundle.sh), bootstrap, and
 # publish and install through it with the real npm.
 #
 #   scripts/smoke.sh                  # build, run, check, leave it running
@@ -24,21 +25,32 @@ export SKEIN_DB_PASSWORD="${SKEIN_DB_PASSWORD:-smoke-db-$RANDOM$RANDOM}"
 export SKEIN_STORE_PASSWORD="${SKEIN_STORE_PASSWORD:-smoke-store-$RANDOM$RANDOM}"
 base="${SMOKE_BASE:-http://127.0.0.1:8080}"
 work="$(mktemp -d)"
+# The stack runs from the release bundle, not the checkout: what is
+# brought up here is what a customer with no source brings up. Its
+# files are kept beside the checkout so SMOKE_DOWN can find them later.
+bundle="$root/target/smoke-bundle/skein-smoke"
+dc() { docker compose -p skein-smoke --project-directory "$bundle" -f "$bundle/compose.yml" "$@"; }
 cleanup() {
+  if [ "${SMOKE_DOWN:-}" = 1 ]; then dc down -v >/dev/null 2>&1 || true; fi
   rm -rf "$work"
-  if [ "${SMOKE_DOWN:-}" = 1 ]; then docker compose down -v >/dev/null 2>&1 || true; fi
 }
 trap cleanup EXIT
-fail() { echo "smoke: FAIL: $*" >&2; docker compose logs skein >&2 || true; exit 1; }
+fail() { echo "smoke: FAIL: $*" >&2; dc logs skein >&2 || true; exit 1; }
 
 echo "smoke: building the image"
 docker build ${SMOKE_EXTRA_CA:+--secret id=extra_ca,src=$SMOKE_EXTRA_CA} -t skein:local . \
   || fail "the image did not build"
+echo "smoke: unpacking the release bundle"
+rm -rf "$root/target/smoke-bundle"
+scripts/bundle.sh smoke "$root/target/smoke-bundle" skein:local >/dev/null \
+  || fail "the bundle did not build"
+tar -C "$root/target/smoke-bundle" -xzf "$root/target/smoke-bundle/skein-compose-smoke.tar.gz"
+grep -q 'build:' "$bundle/compose.yml" && fail "the bundle's compose.yml builds from source"
 echo "smoke: starting the stack"
-docker compose up -d --wait
+dc up -d --wait || fail "the stack did not come up"
 
 echo "smoke: bootstrapping"
-boot="$(docker compose exec -T skein skein admin bootstrap --org acme --json)" \
+boot="$(dc exec -T skein skein admin bootstrap --org acme --json)" \
   || fail "bootstrap"
 token="$(printf '%s' "$boot" | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')"
 

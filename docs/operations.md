@@ -8,13 +8,22 @@ needs.
 
 ## Running it
 
-With Docker Compose — Skein, PostgreSQL and MinIO on one machine:
+With Docker Compose — Skein, PostgreSQL and MinIO on one machine. Each
+release carries `skein-compose-<version>.tar.gz`: the Compose files,
+`.env.example` and the nginx configuration, pinned to that release's
+image, so nothing needs building and no source is needed:
 
 ```sh
+sha256sum -c --ignore-missing SHA256SUMS
+tar -xzf skein-compose-v0.1.0.tar.gz && cd skein-v0.1.0
 cp .env.example .env          # set SKEIN_DB_PASSWORD and SKEIN_STORE_PASSWORD in it
-docker compose up -d --build --wait
+docker compose up -d --wait
 docker compose exec skein skein admin bootstrap --org acme
 ```
+
+From a checkout of the source, the same with `docker compose up -d
+--build --wait`, which builds the image first. The Compose files need
+Docker Compose 2.24 or later (`docker compose version`).
 
 `compose.yml` has no default passwords and refuses to start without
 them. Open `http://localhost:8080` and sign in as `admin` with the
@@ -27,7 +36,7 @@ directory and `SKEIN_PUBLIC_URL` to the `https://` address the
 certificate names. Then
 
 ```sh
-docker compose -f compose.yml -f compose.tls.yml up -d --build --wait
+docker compose -f compose.yml -f compose.tls.yml up -d --wait
 ```
 
 runs nginx ([`deploy/nginx.conf`](../deploy/nginx.conf)) on 443 and 80
@@ -50,9 +59,9 @@ Or the static binary from a release: `skein` serves, and `skein admin …`
 sets up and repairs. Releases carry Linux binaries for x86_64 and
 arm64 and a multi-architecture image, `ghcr.io/weftsh/skein:<version>`.
 
-`scripts/smoke.sh` builds the image, brings the Compose stack up,
-bootstraps it, and publishes and installs through it with the real npm
-— CI runs it on every push.
+`scripts/smoke.sh` builds the image, brings the Compose stack up from
+the release bundle (`scripts/bundle.sh`), bootstraps it, and publishes
+and installs through it with the real npm — CI runs it on every push.
 
 ## Configuration
 
@@ -109,7 +118,10 @@ bucket or npm mirror present certificates from your own CA, put that CA
 (and any intermediates) in one PEM file and set `SKEIN_CA_FILE` to it;
 nothing else needs to change. A certificate Skein cannot verify fails
 with `UnknownIssuer` and a sentence naming `SKEIN_CA_FILE`, on `/readyz`
-and in the log.
+and in the log. `BadSignature` is the same fault one step on: the
+certificate names a CA Skein trusts but a different key signed it —
+your CA was re-issued under its old name, and the file still holds the
+old one.
 
 **PostgreSQL** is reached over TLS when `SKEIN_DB_URL` says so, with
 libpq's own parameters, so a URL from your cloud console works as
@@ -231,6 +243,10 @@ their checksums:
 ```sh
 docker load -i skein-image-v0.1.0-linux-amd64.tar.gz
 ```
+
+The image loads under the name the Compose bundle already names,
+`ghcr.io/weftsh/skein:<version>`, so the bundle then starts with nothing
+pulled for Skein itself.
 
 For the Compose file, bring the `postgres:16`, `nginx` and MinIO images
 too — mirror them into your own registry, or `docker save` and

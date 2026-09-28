@@ -43,7 +43,10 @@ may enter your builds.
 
 ## Try it
 
-You need PostgreSQL and an S3-compatible bucket (MinIO is fine).
+To install it for your organization — from a release's Compose bundle,
+the image, or the static binary, with TLS in front — follow
+[docs/operations.md](docs/operations.md). From a checkout, you need
+PostgreSQL and an S3-compatible bucket (MinIO is fine).
 
 ```sh
 export SKEIN_DB_URL=postgres://skein:skein@127.0.0.1:5432/skein
