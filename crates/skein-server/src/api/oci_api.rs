@@ -259,8 +259,14 @@ async fn start_upload(state: SharedState, org: Org, name: String, query: Option<
     // Not decoration: `docker manifest push` assembles a multi-platform
     // index in one repository out of images pushed to others, mounts
     // every blob first, and treats the 202 fallback as a failure.
+    //
+    // A mount is a use: the client will name this blob in a manifest
+    // without ever sending it, so the answer marks it used and the
+    // collector's grace runs from here — not from whenever the bytes
+    // were first stored, which may be long enough ago that a sweep
+    // before the manifest would take them.
     if let Some(digest) = query_param(query, "mount").filter(|d| oci::valid_digest(d)) {
-        match packages::blob_exists(&state.db, &org.id, &digest) {
+        match packages::touch_blob(&state.db, &org.id, &digest, now) {
             Ok(Some(_)) => {
                 return (
                     StatusCode::CREATED,
@@ -519,7 +525,43 @@ async fn finish_upload(
         .into_response()
 }
 
+/// What a blob is answered with, HEAD or GET.
+fn blob_headers(digest: &str, size: i64) -> [(HeaderName, String); 4] {
+    [
+        (header::CONTENT_TYPE, "application/octet-stream".to_string()),
+        (header::CONTENT_LENGTH, size.to_string()),
+        (
+            HeaderName::from_static("docker-content-digest"),
+            digest.to_string(),
+        ),
+        (
+            header::CACHE_CONTROL,
+            "private, max-age=31536000, immutable".to_string(),
+        ),
+    ]
+}
+
 async fn get_blob(state: SharedState, org: Org, digest: String, head_only: bool) -> Response {
+    // A HEAD is how `docker push` decides not to send a layer: answered
+    // 200, it skips the upload and names the layer in a manifest it
+    // sends later. So a HEAD is a use, answered by the one statement
+    // that marks it — the collector's grace then runs from this answer,
+    // and a layer an untagged image left behind a week ago is not taken
+    // between it and the manifest. The row's size is the whole blob's
+    // for either shape, so nothing else needs reading.
+    //
+    // A GET is not: handing somebody bytes promises nothing about
+    // keeping them, and marking every pull would make a download a
+    // write.
+    if head_only {
+        let now = skein_control::ids::now_ms();
+        return match packages::touch_blob(&state.db, &org.id, &digest, now) {
+            Ok(Some(size)) => (StatusCode::OK, blob_headers(&digest, size)).into_response(),
+            Ok(None) => oci_error(StatusCode::NOT_FOUND, "BLOB_UNKNOWN", "no such blob"),
+            Err(e) => internal(e),
+        };
+    }
+
     let blocks = match packages::blocks_of(&state.db, &org.id, &digest) {
         Ok(b) => b,
         Err(e) => return internal(e),
@@ -533,22 +575,7 @@ async fn get_blob(state: SharedState, org: Org, digest: String, head_only: bool)
     } else {
         blocks.iter().map(|b| b.size_bytes).sum()
     };
-
-    let common = [
-        (header::CONTENT_TYPE, "application/octet-stream".to_string()),
-        (header::CONTENT_LENGTH, size.to_string()),
-        (
-            HeaderName::from_static("docker-content-digest"),
-            digest.clone(),
-        ),
-        (
-            header::CACHE_CONTROL,
-            "private, max-age=31536000, immutable".to_string(),
-        ),
-    ];
-    if head_only {
-        return (StatusCode::OK, common).into_response();
-    }
+    let common = blob_headers(&digest, size);
 
     let store_url = state.store_url.clone();
     let prefix = org.package_prefix();
@@ -644,6 +671,26 @@ async fn get_manifest(
         }
     };
 
+    // A HEAD of a manifest is a use, for the reason a HEAD of a layer
+    // is: a multi-platform push asks after each member manifest by
+    // digest and, told 200, names it in the index it sends next. The
+    // member has no tag of its own, so nothing references it until
+    // that index arrives, and only this answer keeps the collector off
+    // it in between.
+    if head_only {
+        let now = skein_control::ids::now_ms();
+        match packages::touch_blob(&state.db, &org.id, &digest, now) {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                return oci_error(
+                    StatusCode::NOT_FOUND,
+                    "MANIFEST_UNKNOWN",
+                    "no such manifest",
+                )
+            }
+            Err(e) => return internal(e),
+        }
+    }
     let bytes = match read_blob(&state, &org, &digest).await {
         Ok(Some(b)) => b,
         Ok(None) => {
@@ -721,6 +768,7 @@ async fn needs(
     let mut out: Vec<oci::Descriptor> = Vec::new();
     let mut seen = std::collections::HashSet::new();
     let mut pending: Vec<(oci::Manifest, usize)> = vec![(manifest.clone(), 0)];
+    let now = skein_control::ids::now_ms();
     while let Some((m, depth)) = pending.pop() {
         // An index's members are *manifests*, which live here too and
         // are stored as blobs — so the lookup is the same and only the
@@ -741,7 +789,10 @@ async fn needs(
                     format!("{} is not a digest this registry could hold", d.digest),
                 ));
             }
-            let size = match packages::blob_exists(&state.db, &org.id, &d.digest) {
+            // Checked and marked used in one statement: the rows that
+            // will reference it are written after this, and a sweep in
+            // between must see that the blob is in use.
+            let size = match packages::touch_blob(&state.db, &org.id, &d.digest, now) {
                 Ok(Some(n)) => n,
                 Ok(None) => {
                     return Err(oci_error(

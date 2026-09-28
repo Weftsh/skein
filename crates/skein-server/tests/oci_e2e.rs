@@ -1818,6 +1818,185 @@ fn a_deleted_images_blocks_are_collected_and_a_shared_one_survives() {
     assert!(server.healthy());
 }
 
+/// A blob a push is building on is not collected under it, however long
+/// ago it was first stored.
+///
+/// `docker push` asks `HEAD /v2/<repo>/blobs/<digest>` for every layer,
+/// skips each one answered 200, and PUTs the manifest last. Content
+/// addressing means the layer it skips may be one an untagged image left
+/// behind long ago — and the collector's grace used to run from when
+/// those bytes were *first* stored, so a layer stored a week ago and
+/// unreferenced since was collectable at the very moment a push was
+/// relying on it. A sweep between the HEAD and the manifest took it: the
+/// push failed, or, if the manifest's own check had already passed, was
+/// accepted naming a layer that was no longer there.
+///
+/// Every way a client builds on bytes it did not send this time is here:
+/// a HEAD of a blob, a cross-repository mount, a HEAD of a manifest by
+/// digest (how a multi-platform push checks an index's members), and an
+/// upload that finishes on a digest already stored. What nobody touched
+/// is collected by the same pass, which is what proves the pass ran.
+#[test]
+fn a_blob_a_push_is_building_on_is_not_collected_however_old_it_is() {
+    let bucket = Minio::shared().bucket("oci-e2e");
+    let server = spawn(&bucket.base_url, "oci-gc-touch");
+    let admin = acme(&server);
+    let b = v2(&server);
+    let old = "acme/old";
+    let new = "acme/new";
+
+    let config_bytes = &b"{\"os\":\"linux\"}"[..];
+    let headed_bytes = &b"a layer the next push asks about"[..];
+    let mounted_bytes = &b"a layer the next push mounts"[..];
+    let resent_bytes = &b"a layer the next push sends again"[..];
+    let config = push_blob(&server, old, &admin, config_bytes);
+    let headed = push_blob(&server, old, &admin, headed_bytes);
+    let mounted = push_blob(&server, old, &admin, mounted_bytes);
+    let resent = push_blob(&server, old, &admin, resent_bytes);
+    let forgotten = push_blob(&server, old, &admin, b"a layer nobody asks about again");
+    let image = manifest(
+        &config,
+        &[
+            (&headed, 32),
+            (&mounted, 28),
+            (&resent, 33),
+            (&forgotten, 31),
+        ],
+    );
+    let r = req(
+        "PUT",
+        &format!("{b}/{old}/manifests/v1"),
+        &admin,
+        Some(&image),
+    );
+    assert_eq!(r.status, 201, "{}", r.text());
+    // A platform manifest pushed by digest alone, the way a
+    // multi-platform push sends an index's members.
+    let member = manifest(&config, &[(&headed, 32)]);
+    let member_digest = sha256(&member);
+    let r = req(
+        "PUT",
+        &format!("{b}/{old}/manifests/{member_digest}"),
+        &admin,
+        Some(&member),
+    );
+    assert_eq!(r.status, 201, "{}", r.text());
+
+    // Untag the image: every one of those blobs is now referenced by
+    // nothing — and make them old, stored two hours ago.
+    assert_eq!(
+        req("DELETE", &format!("{b}/{old}/manifests/v1"), &admin, None).status,
+        202
+    );
+    let org = {
+        let db = skein_control::ControlDb::open(&server.db_url).expect("open control db");
+        skein_control::registry::the_org(&db)
+            .expect("lookup")
+            .expect("org")
+    };
+    let mut pg = postgres::Client::connect(&server.db_url, postgres::NoTls).expect("connect");
+    let aged = pg
+        .execute(
+            "UPDATE package_blobs SET created_at = created_at - $2, \
+                                      touched_at = touched_at - $2 \
+             WHERE org_id = $1",
+            &[&org.id, &(2 * 3600 * 1000i64)],
+        )
+        .expect("age the blobs");
+    assert_eq!(
+        aged, 7,
+        "the config, four layers, the image and the member manifest"
+    );
+
+    // The next push, as a client makes it: it asks about what it could
+    // skip, mounts what another repository holds, sends one layer again,
+    // and checks the index's member by digest.
+    for d in [&config, &headed] {
+        let r = req("HEAD", &format!("{b}/{old}/blobs/{d}"), &admin, None);
+        assert_eq!(r.status, 200, "HEAD {d}");
+    }
+    let r = req(
+        "POST",
+        &format!("{b}/{new}/blobs/uploads/?mount={mounted}&from={old}"),
+        &admin,
+        Some(b""),
+    );
+    assert_eq!(r.status, 201, "mounting: {}", r.text());
+    assert_eq!(push_blob(&server, new, &admin, resent_bytes), resent);
+    let r = req(
+        "HEAD",
+        &format!("{b}/{old}/manifests/{member_digest}"),
+        &admin,
+        None,
+    );
+    assert_eq!(r.status, 200, "HEAD the member by digest");
+
+    // The collector runs between those answers and the manifest, with
+    // an hour's grace.
+    let out = server
+        .admin(&["admin", "gc", "--grace-secs", "3600"])
+        .expect("admin gc");
+    let swept: serde_json::Value = serde_json::from_str(out.trim()).expect("json");
+    assert_eq!(
+        swept["blobs"], 2,
+        "only the layer nobody asked about and the untagged image's manifest \
+         were idle for the grace; the rest were in use a moment ago: {swept}"
+    );
+    let r = req(
+        "HEAD",
+        &format!("{b}/{old}/blobs/{forgotten}"),
+        &admin,
+        None,
+    );
+    assert_eq!(r.status, 404, "the pass collected nothing at all");
+
+    // The push finishes: an image and an index naming only what the
+    // client was told was here.
+    let image2 = manifest(&config, &[(&headed, 32), (&mounted, 28), (&resent, 33)]);
+    let r = req(
+        "PUT",
+        &format!("{b}/{new}/manifests/v2"),
+        &admin,
+        Some(&image2),
+    );
+    assert_eq!(
+        r.status,
+        201,
+        "the manifest names a layer the registry said it held: {}",
+        r.text()
+    );
+    let idx = index(&[(&member_digest, member.len())]);
+    let r = req(
+        "PUT",
+        &format!("{b}/{new}/manifests/multi"),
+        &admin,
+        Some(&idx),
+    );
+    assert_eq!(r.status, 201, "{}", r.text());
+
+    // …and pulls back byte for byte, every blob of it.
+    let r = req("GET", &format!("{b}/{new}/manifests/v2"), &admin, None);
+    assert_eq!(r.body, image2);
+    let r = req(
+        "GET",
+        &format!("{b}/{new}/manifests/{member_digest}"),
+        &admin,
+        None,
+    );
+    assert_eq!(r.body, member);
+    for (d, want) in [
+        (&config, config_bytes),
+        (&headed, headed_bytes),
+        (&mounted, mounted_bytes),
+        (&resent, resent_bytes),
+    ] {
+        let r = req("GET", &format!("{b}/{new}/blobs/{d}"), &admin, None);
+        assert_eq!(r.status, 200, "{d} was collected under the push");
+        assert_eq!(r.body, want, "{d} came back different");
+    }
+    assert!(server.healthy());
+}
+
 /// An upload that stops part-way through its own declared body.
 ///
 /// A `docker push` over a dropped connection is exactly this: the

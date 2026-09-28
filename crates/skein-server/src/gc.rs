@@ -5,14 +5,30 @@
 //! refcounting:
 //!
 //! * **The grace window is load-bearing, not politeness.** A publish
-//!   writes its object and *then* its `package_files` row, so a blob
-//!   uploaded seconds ago and not yet referenced is a publish in flight.
-//!   Collecting it would delete the bytes of a version that is about to
-//!   become visible.
-//! * **The reference is re-read immediately before the delete.** The
-//!   listing is a snapshot; a publish that lands during the sweep can
-//!   dedupe against a digest this pass already decided was garbage. The
-//!   second read is what stops that publish from losing its bytes.
+//!   writes its object and *then* its `package_files` row, and a
+//!   `docker push` is told a layer is here and *then* sends the manifest
+//!   naming it — so a blob used seconds ago and not yet referenced is a
+//!   publish in flight. Collecting it would delete the bytes of a
+//!   version that is about to become visible.
+//! * **The grace runs from the last use, not the first storage.**
+//!   Content addressing means the bytes a push relies on may be bytes an
+//!   untagged image left behind a week ago. Measured from when they were
+//!   first stored — as it once was — the window protected nothing for
+//!   them: a sweep between a HEAD answered 200 and the manifest took the
+//!   layer, and the push failed or was accepted naming a layer that was
+//!   gone. Every use moves `touched_at` — storing, storing again, a
+//!   HEAD, a mount, a manifest's check (`packages::touch_blob`) — and
+//!   that is what the window is measured from.
+//! * **Both halves are re-read immediately before the delete.** The
+//!   listing is a snapshot: a publish can name the digest during the
+//!   sweep, and a client can be told it is here and start building on
+//!   it. `packages::collectable` asks both; re-reading only the
+//!   reference lost the second.
+//!
+//! What the re-read cannot close is a use that lands between it and the
+//! delete: a window one object-store delete wide, the same one the
+//! reference check has always had. Closing it would take a claim the
+//! collector writes as its re-check and every use respects.
 //!
 //! The row is forgotten only after the object is gone, so a crash in
 //! between leaves a row whose object is missing — which the next pass
@@ -22,8 +38,8 @@
 //! Two nodes sweeping at once is safe for the same reasons: every delete
 //! is re-checked and idempotent.
 
-use crate::app::SharedState;
-use skein_control::packages;
+use crate::app::{AppState, SharedState};
+use skein_control::{packages, PackagePrefix};
 
 /// How many unreferenced blobs one pass considers. What it does not
 /// reach this pass, it reaches the next.
@@ -43,8 +59,8 @@ pub struct Swept {
 }
 
 /// Start the periodic collector: every `SKEIN_GC_INTERVAL_SECS` (default
-/// an hour, `0` switches it off), collecting what has been unreferenced
-/// for at least `SKEIN_GC_GRACE_SECS` (default an hour).
+/// an hour, `0` switches it off), collecting what nothing references and
+/// nobody has used for at least `SKEIN_GC_GRACE_SECS` (default an hour).
 pub fn spawn(state: SharedState) {
     let every = env_secs("SKEIN_GC_INTERVAL_SECS", 3600);
     if every == 0 {
@@ -91,35 +107,10 @@ pub fn sweep(state: &SharedState, grace_secs: u64) -> Result<Swept, String> {
     let before = skein_control::ids::now_ms() - grace_secs as i64 * 1000;
 
     for (digest, size) in packages::unreferenced_blobs(&state.db, &org.id, before, BATCH)? {
-        // Somebody published against it between the listing and now.
-        if packages::blob_referenced(&state.db, &org.id, &digest)? {
-            continue;
+        if collect(state, &org.id, &prefix, &digest, before)? {
+            out.blobs += 1;
+            out.bytes += size;
         }
-        // A blob is one object or a list of blocks, and the shape is not
-        // the collector's to know: it asks for the blocks and deletes
-        // whichever it finds. Without this a large layer would be
-        // "collected" by deleting a key that never existed, and its
-        // blocks would stay in the bucket for ever.
-        let blocks = packages::blocks_of(&state.db, &org.id, &digest)?;
-        if blocks.is_empty() {
-            crate::registry::blobs::delete(&state.store_url, &prefix, &digest)?;
-        } else {
-            for b in &blocks {
-                // Blocks dedupe across blobs: two images sharing a base
-                // layer share its blocks.
-                if packages::block_referenced_elsewhere(&state.db, &org.id, &b.block, &digest)? {
-                    continue;
-                }
-                crate::registry::blobs::delete(&state.store_url, &prefix, &b.block)?;
-            }
-        }
-        // The block list goes **after** the blocks themselves, so a crash
-        // between the two leaves orphaned objects the next pass finds
-        // rather than a list pointing at nothing.
-        packages::forget_blocks(&state.db, &org.id, &digest)?;
-        packages::forget_blob(&state.db, &org.id, &digest)?;
-        out.blobs += 1;
-        out.bytes += size;
     }
 
     // Upload sessions nobody finished, **and their blocks** — objects
@@ -145,4 +136,120 @@ pub fn sweep(state: &SharedState, grace_secs: u64) -> Result<Swept, String> {
         out.uploads += 1;
     }
     Ok(out)
+}
+
+/// Delete one blob the listing found — unless, since the listing,
+/// something has named it or somebody has been told it is here. Whether
+/// it was deleted.
+fn collect(
+    state: &AppState,
+    org_id: &str,
+    prefix: &PackagePrefix,
+    digest: &str,
+    before: i64,
+) -> Result<bool, String> {
+    // The listing is a snapshot. A publish may have named this digest
+    // since, or a HEAD, a mount or a manifest's check may have told a
+    // client it is here — and the client is building on that answer.
+    if !packages::collectable(&state.db, org_id, digest, before)? {
+        return Ok(false);
+    }
+    // A blob is one object or a list of blocks, and the shape is not
+    // the collector's to know: it asks for the blocks and deletes
+    // whichever it finds. Without this a large layer would be
+    // "collected" by deleting a key that never existed, and its
+    // blocks would stay in the bucket for ever.
+    let blocks = packages::blocks_of(&state.db, org_id, digest)?;
+    if blocks.is_empty() {
+        crate::registry::blobs::delete(&state.store_url, prefix, digest)?;
+    } else {
+        for b in &blocks {
+            // Blocks dedupe across blobs: two images sharing a base
+            // layer share its blocks.
+            if packages::block_referenced_elsewhere(&state.db, org_id, &b.block, digest)? {
+                continue;
+            }
+            crate::registry::blobs::delete(&state.store_url, prefix, &b.block)?;
+        }
+    }
+    // The block list goes **after** the blocks themselves, so a crash
+    // between the two leaves orphaned objects the next pass finds
+    // rather than a list pointing at nothing.
+    packages::forget_blocks(&state.db, org_id, digest)?;
+    packages::forget_blob(&state.db, org_id, digest)?;
+    Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::registry::blobs;
+    use skein_store::ObjectStore;
+
+    /// The re-check before the delete sees a client that was told a
+    /// blob is here *after* the listing, and leaves the blob alone.
+    ///
+    /// The listing is a snapshot. A sweep that re-read only the
+    /// reference — as this one did — deleted a layer a `docker push` had
+    /// been answered 200 for a moment earlier, because nothing names a
+    /// layer until the manifest arrives. Two old, unreferenced blobs;
+    /// one is asked about between the listing and the delete; only the
+    /// other goes, from the store and from the table.
+    #[test]
+    fn a_blob_used_after_the_listing_is_not_deleted() {
+        let db = skein_control::ControlDb::open(&skein_testkit::pg::test_db_url("gc-recheck"))
+            .expect("open control db");
+        let org = skein_control::registry::create_org(&db, "acme").expect("org");
+        let bucket = skein_testkit::Minio::shared().bucket("gc-recheck");
+        let state = AppState::new(
+            db,
+            bucket.base_url.clone(),
+            "http://127.0.0.1".into(),
+            crate::license::Licensing::from_env().expect("licensing"),
+        );
+        let prefix = org.package_prefix();
+
+        let asked: &[u8] = b"bytes a client is told are here";
+        let idle: &[u8] = b"bytes nobody asks about";
+        for bytes in [asked, idle] {
+            let d = blobs::put(&state.store_url, &prefix, &blobs::digest_of(bytes), bytes)
+                .expect("put");
+            packages::note_blob(&state.db, &org.id, &d, bytes.len() as i64, 10).expect("note");
+        }
+        let before = 1_000;
+        let listed = packages::unreferenced_blobs(&state.db, &org.id, before, BATCH).unwrap();
+        assert_eq!(listed.len(), 2, "{listed:?}");
+
+        // Between the listing and the delete, a HEAD answers 200 for one.
+        assert!(
+            packages::touch_blob(&state.db, &org.id, &blobs::digest_of(asked), 5_000)
+                .unwrap()
+                .is_some()
+        );
+
+        let mut taken = Vec::new();
+        for (d, _) in &listed {
+            if collect(&state, &org.id, &prefix, d, before).unwrap() {
+                taken.push(d.clone());
+            }
+        }
+        assert_eq!(taken, vec![blobs::digest_of(idle)]);
+
+        let store = ObjectStore::new(&state.store_url);
+        assert!(
+            store.get(&prefix.blob(&blobs::digest_of(asked))).is_ok(),
+            "the collector deleted bytes a client had just been told were here"
+        );
+        assert!(
+            packages::blob_exists(&state.db, &org.id, &blobs::digest_of(asked))
+                .unwrap()
+                .is_some()
+        );
+        assert!(store.get(&prefix.blob(&blobs::digest_of(idle))).is_err());
+        assert!(
+            packages::blob_exists(&state.db, &org.id, &blobs::digest_of(idle))
+                .unwrap()
+                .is_none()
+        );
+    }
 }

@@ -395,6 +395,27 @@ pub(crate) const MIGRATIONS: &[&str] = &[
      WHERE p.id = v.package_id AND p.ecosystem = 'oci'
        AND v.normalized_version <> v.version;
     "#,
+    // 0004 — the collector's grace runs from a blob's last use, not its
+    // first storage.
+    //
+    // `created_at` is when a digest was first stored, and storing or
+    // reusing the same digest again never moved it. So a layer stored a
+    // week ago and unreferenced since was collectable at the very moment
+    // a push was building on it — answered 200 to a HEAD, mounted, or
+    // written again — and a sweep between that answer and the manifest
+    // took the layer out from under the push. `touched_at` is moved by
+    // every use (`packages::note_blob`, `note_blocked_blob`,
+    // `touch_blob`) and is what the collector measures.
+    //
+    // Deliberately not indexed: the collector scans this table once an
+    // hour, while a touch is an UPDATE on every HEAD, and an index on
+    // the column a touch changes would make every one of them a non-HOT
+    // update that rewrites the index too.
+    r#"
+    ALTER TABLE package_blobs ADD COLUMN touched_at BIGINT;
+    UPDATE package_blobs SET touched_at = created_at;
+    ALTER TABLE package_blobs ALTER COLUMN touched_at SET NOT NULL;
+    "#,
 ];
 
 /// The sync `postgres` client drives its own internal runtime with
@@ -664,6 +685,60 @@ pub(crate) fn is_unique_violation(e: &postgres::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An install upgraded to the migration that gives blobs a
+    /// `touched_at` keeps every blob it already holds, each aged by when
+    /// it was stored — not made immortal by a NULL, not made collectable
+    /// on the spot by a zero, and not refused by the `NOT NULL`.
+    ///
+    /// Found by content rather than by number, so the test still names
+    /// the right migration if another is appended ahead of it in a merge.
+    #[test]
+    fn blobs_stored_before_touched_at_existed_are_aged_by_their_storage() {
+        let url = skein_testkit::pg::test_db_url("db_touched_upgrade");
+        let at = MIGRATIONS
+            .iter()
+            .position(|m| m.contains("ADD COLUMN touched_at"))
+            .expect("the migration that adds touched_at");
+        {
+            let mut c = Client::connect(&url, NoTls).unwrap();
+            c.batch_execute(
+                "CREATE TABLE schema_migrations (
+                    version BIGINT PRIMARY KEY, applied_at BIGINT NOT NULL)",
+            )
+            .unwrap();
+            for (i, sql) in MIGRATIONS[..at].iter().enumerate() {
+                c.batch_execute(sql).unwrap();
+                c.execute(
+                    "INSERT INTO schema_migrations (version, applied_at) VALUES ($1, 0)",
+                    &[&((i + 1) as i64)],
+                )
+                .unwrap();
+            }
+            c.batch_execute(
+                "INSERT INTO orgs (id, name, created_at) VALUES ('01ORG', 'acme', 1);
+                 INSERT INTO package_blobs (org_id, digest, size_bytes, created_at)
+                     VALUES ('01ORG', repeat('a', 64), 5, 1000),
+                            ('01ORG', repeat('b', 64), 6, 9000);",
+            )
+            .unwrap();
+        }
+
+        let db = ControlDb::open(&url).expect("the upgrade applies to a table with rows in it");
+        let rows = db
+            .lock()
+            .query(
+                "SELECT created_at, touched_at FROM package_blobs ORDER BY digest",
+                &[],
+            )
+            .unwrap();
+        let ages: Vec<(i64, i64)> = rows.iter().map(|r| (r.get(0), r.get(1))).collect();
+        assert_eq!(ages, vec![(1000, 1000), (9000, 9000)]);
+        assert_eq!(
+            crate::packages::unreferenced_blobs(&db, "01ORG", 5_000, 10).unwrap(),
+            vec![("a".repeat(64), 5)]
+        );
+    }
 
     /// A failing migration says what was wrong with it.
     ///

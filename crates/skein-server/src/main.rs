@@ -113,7 +113,8 @@ enum Admin {
     SetRole { username: String, role: String },
     /// Collect package bytes nothing references any more, now.
     Gc {
-        /// Only what has been unreferenced for at least this long.
+        /// Only what nothing references and nobody has used — stored,
+        /// pushed, mounted or asked about — for at least this long.
         #[arg(long, default_value_t = 3600)]
         grace_secs: u64,
     },
