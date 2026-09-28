@@ -327,11 +327,26 @@ fn an_ecosystem_that_is_off_answers_for_nothing() {
         .map(|e| e["ecosystem"].as_str().unwrap_or_default())
         .collect();
     assert_eq!(names, vec!["npm", "maven", "pypi", "cargo", "oci"]);
-    assert!(body["ecosystems"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|e| e["mode"] == "off"));
+    // npm is off, and switching it off touched nothing else: every other
+    // ecosystem is exactly as the bootstrap left it — `private` if this
+    // build has a door for it, `off` if not.
+    let (_, overview) = server.get("/api/v1/overview", &admin);
+    let served = |eco: &str| {
+        overview["ecosystems"]
+            .as_array()
+            .expect("the overview lists ecosystems")
+            .iter()
+            .any(|e| e["ecosystem"] == eco && e["served"] == true)
+    };
+    for e in body["ecosystems"].as_array().unwrap() {
+        let eco = e["ecosystem"].as_str().unwrap_or_default();
+        let want = if eco != "npm" && served(eco) {
+            "private"
+        } else {
+            "off"
+        };
+        assert_eq!(e["mode"], want, "{eco}: {body}");
+    }
     assert_eq!(body["registry_base"], server.base, "{body}");
 
     common::enable(&server, &admin, "npm");

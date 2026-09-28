@@ -2,6 +2,7 @@
 //! client's own wire protocol, and the REST API the UI and an operator's
 //! scripts use.
 
+pub mod cargo_api;
 pub mod npm_api;
 pub mod packages_api;
 pub mod people_api;

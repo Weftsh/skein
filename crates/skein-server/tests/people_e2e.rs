@@ -73,12 +73,38 @@ fn an_install_says_how_to_set_it_up_and_is_ready_once_it_is() {
     let boot = bootstrap_json(&server, &[]);
     assert_eq!(boot["org"], "acme");
     assert_eq!(boot["username"], "admin");
-    assert_eq!(boot["ecosystems"], serde_json::json!(["npm"]));
     let password = boot["password"].as_str().expect("a generated password");
     assert!(password.len() >= 20, "{password}");
 
     assert_eq!(server.raw("GET", "/readyz", &[], None).status, 200);
     let token = boot["token"].as_str().unwrap();
+
+    // The bootstrap switches on exactly the ecosystems this build has a
+    // door for, each in `private` mode, and leaves every other one off.
+    let (_, overview) = server.get("/api/v1/overview", token);
+    let mut served: Vec<&str> = Vec::new();
+    for e in overview["ecosystems"].as_array().expect("ecosystems") {
+        let eco = e["ecosystem"].as_str().unwrap_or_default();
+        let want = if e["served"] == true {
+            served.push(eco);
+            "private"
+        } else {
+            "off"
+        };
+        assert_eq!(e["mode"], want, "{eco}: {overview}");
+    }
+    for door in ["npm", "cargo"] {
+        assert!(served.contains(&door), "{door} is not served: {overview}");
+    }
+    let mut booted: Vec<&str> = boot["ecosystems"]
+        .as_array()
+        .expect("the ecosystems it switched on")
+        .iter()
+        .map(|e| e.as_str().unwrap_or_default())
+        .collect();
+    booted.sort_unstable();
+    served.sort_unstable();
+    assert_eq!(booted, served, "{boot}");
     let (status, me) = server.get("/api/v1/me", token);
     assert_eq!(status, 200, "{me}");
     assert_eq!(me["username"], "admin");
