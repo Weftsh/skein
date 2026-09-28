@@ -1,0 +1,6 @@
+# Pinned, not "stable": a toolchain bump is a reviewed commit with one
+# known-slow CI run, rather than every branch's cache going cold on the
+# same day. Matches stratum-core, which Skein was carved out of.
+[toolchain]
+channel = "1.96.0"
+components = ["rustfmt", "clippy"]

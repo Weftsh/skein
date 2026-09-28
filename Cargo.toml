@@ -1,0 +1,38 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/skein-store",
+    "crates/skein-control",
+    "crates/skein-server",
+    "crates/skein-testkit",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license-file = "LICENSE.md"
+repository = "https://github.com/weftsh/skein"
+publish = false
+
+[workspace.dependencies]
+skein-store = { path = "crates/skein-store" }
+skein-control = { path = "crates/skein-control" }
+skein-testkit = { path = "crates/skein-testkit" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha1 = "0.10"
+sha2 = "0.10"
+hmac = "0.12"
+flate2 = "1"
+libc = "0.2"
+ureq = { version = "2", default-features = false, features = ["tls"] }
+postgres = { version = "0.19", features = ["with-serde_json-1"] }
+argon2 = "0.5"
+
+[profile.release]
+debug = 1
+
+# Dependencies, never a workspace member: the debug test suite stops
+# paying unoptimised Argon2, SHA-2 and zlib on every publish.
+[profile.dev.package."*"]
+opt-level = 3

@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer push supersedes the runs of older commits on the same branch.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Test (fmt, clippy, suite)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.96.0"
+          components: rustfmt, clippy
+      # Keyed on the manifest as well as the lockfile: rust-cache's own
+      # key does not cover `[profile.*]`, and a profile change would
+      # otherwise restore stale artifacts and rebuild every run.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ hashFiles('Cargo.toml') }}
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      # Pinned, and cached on the pin: a MinIO release must not be able
+      # to turn this repository red with no commit behind it.
+      - name: MinIO version
+        id: minio
+        run: echo "release=$(cat .minio-version)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: .testkit/bin/minio
+          key: minio-linux-amd64-${{ steps.minio.outputs.release }}
+      - name: Fetch MinIO (testkit backend)
+        run: scripts/fetch-minio.sh
+      # PostgreSQL comes from the runner image (/usr/lib/postgresql/*/bin);
+      # the testkit starts a private cluster per test process.
+      - name: Tests
+        run: cargo test --workspace
+
+  clients:
+    name: Real clients
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.96.0"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ hashFiles('Cargo.toml') }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: MinIO version
+        id: minio
+        run: echo "release=$(cat .minio-version)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: .testkit/bin/minio
+          key: minio-linux-amd64-${{ steps.minio.outputs.release }}
+      - name: Fetch MinIO (testkit backend)
+        run: scripts/fetch-minio.sh
+      # Every client named here must be installed and must pass: a
+      # missing one fails rather than printing a NOTE, because this job
+      # exists to prove each contract against the real thing.
+      - name: Real clients against a real server
+        env:
+          SKEIN_REQUIRE_CLIENTS: npm
+        run: cargo test -p skein-server --test clients_e2e -- --nocapture

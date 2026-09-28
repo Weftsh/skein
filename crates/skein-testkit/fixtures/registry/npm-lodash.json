@@ -1,0 +1,125 @@
+{
+  "dist-tags": {
+    "latest": "4.18.1"
+  },
+  "name": "lodash",
+  "time": {
+    "0.1.0": "2012-04-23T16:37:12.603Z",
+    "0.2.0": "2012-05-22T04:06:24.044Z",
+    "0.2.1": "2012-05-24T21:53:08.449Z",
+    "0.2.2": "2012-05-30T07:56:26.644Z",
+    "0.3.0": "2012-06-06T20:01:49.669Z"
+  },
+  "versions": {
+    "0.1.0": {
+      "dependencies": {},
+      "dist": {
+        "integrity": "sha512-ufIfwX7g5obXKaJhzbnAJBNf5Idxqty+AHaNadWFxtNKjGmF/ZO8ptSEjQRQRymBPZtLa0NV9sbrsH87Ae2R1A==",
+        "shasum": "392617f69a947e40cec7848d85fcc3dd29d74bc5",
+        "signatures": [
+          {
+            "keyid": "SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA",
+            "sig": "MEQCIBB7pdqPfBFUsZQhVr3woDJ7/bbRWV3tlXQZNp3ivosbAiBMhwfq9fqaJvFFX1/scqPbIywUUZCQkfJaISqaJbZX2Q=="
+          }
+        ],
+        "tarball": "https://registry.npmjs.org/lodash/-/lodash-0.1.0.tgz"
+      },
+      "licenses": [
+        {
+          "type": "MIT",
+          "url": "http://mths.be/mit"
+        }
+      ],
+      "name": "lodash",
+      "version": "0.1.0"
+    },
+    "0.2.0": {
+      "dependencies": {},
+      "dist": {
+        "integrity": "sha512-WUvXFMYqweevRJzqnj5G8pJ2wOjNHTnP4+x+qBdoGstLRo3oWob98Oydu7fMD3bZJ2oXrzx5AJBZoc/jlBfLeA==",
+        "shasum": "efaa16fb4614bdce9a7a9fdda487125d3fab38a2",
+        "signatures": [
+          {
+            "keyid": "SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA",
+            "sig": "MEYCIQDqI9ix1b2CvBRIEAmBw9599iQB+RG4/Ns71Hix0xA9aQIhANODxwn1tYviwWSPBsWgtYH46txfftzT603ZjIzeljMY"
+          }
+        ],
+        "tarball": "https://registry.npmjs.org/lodash/-/lodash-0.2.0.tgz"
+      },
+      "licenses": [
+        {
+          "type": "MIT",
+          "url": "http://lodash.com/license"
+        }
+      ],
+      "name": "lodash",
+      "version": "0.2.0"
+    },
+    "0.2.1": {
+      "dependencies": {},
+      "dist": {
+        "integrity": "sha512-rF+K2OphXlCLxiBFZHXnqXfP3xfbaF5VxS+sFZRLvqxHzHWPI7ZjN4HW2EkvoMu9cC3mVQ2HZPrC/4qYh3x3/A==",
+        "shasum": "fcdd734c401af6215d1ac511dc30e8003dde4607",
+        "signatures": [
+          {
+            "keyid": "SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA",
+            "sig": "MEYCIQDwqRt3zWu86t20PxfrTJBEa3OiX00S/Dg1z+kjvpBGxgIhALb+MZEIxvw9e2d2CfTKMpTYlUQlxeWvsQ0pASscWy+T"
+          }
+        ],
+        "tarball": "https://registry.npmjs.org/lodash/-/lodash-0.2.1.tgz"
+      },
+      "licenses": [
+        {
+          "type": "MIT",
+          "url": "http://lodash.com/license"
+        }
+      ],
+      "name": "lodash",
+      "version": "0.2.1"
+    },
+    "0.2.2": {
+      "dependencies": {},
+      "dist": {
+        "integrity": "sha512-OPzZZb4xiAJMdQiiX0+lNENfJi2Q81d47msW92eAO53WsGvfSLPNuH3Y5rj16X95LyDJJFZI5oTyZH8hqw+YAA==",
+        "shasum": "d79277dafa86346a181dd924365215b126fdf2cb",
+        "signatures": [
+          {
+            "keyid": "SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA",
+            "sig": "MEYCIQDTxiOdJ8JtYNG0T9CK9nVkXuR1nZRrDh0KMLAsjI02eAIhAIcfL4aBSB3DNMeiaxh6L07xYrV/APe28idWpjUx2hGc"
+          }
+        ],
+        "tarball": "https://registry.npmjs.org/lodash/-/lodash-0.2.2.tgz"
+      },
+      "licenses": [
+        {
+          "type": "MIT",
+          "url": "http://lodash.com/license"
+        }
+      ],
+      "name": "lodash",
+      "version": "0.2.2"
+    },
+    "0.3.0": {
+      "dependencies": {},
+      "dist": {
+        "integrity": "sha512-J/aUWOfASTdkrHQTrPFv15Z3jKM3YfRi9iw5iv3hro5A2yiPlDQONmhe/MFz5OR1l6gMgPz6iaTZP46NC6sacw==",
+        "shasum": "e7db413e8b50d48834e86f82c52fd64f0a9e5d6e",
+        "signatures": [
+          {
+            "keyid": "SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA",
+            "sig": "MEQCIG0RYm+Cmnh7wriDFJiG5ubPysJh+fd1fcwNZl70bcvrAiAcZpGSbMoiuguQPu9ITbHYhzAHNrTsS3xXnel4oIB5XA=="
+          }
+        ],
+        "tarball": "https://registry.npmjs.org/lodash/-/lodash-0.3.0.tgz"
+      },
+      "licenses": [
+        {
+          "type": "MIT",
+          "url": "http://lodash.com/license"
+        }
+      ],
+      "name": "lodash",
+      "version": "0.3.0"
+    }
+  }
+}

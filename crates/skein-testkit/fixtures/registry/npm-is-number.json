@@ -1,0 +1,114 @@
+{
+  "dist-tags": {
+    "latest": "7.0.0"
+  },
+  "name": "is-number",
+  "time": {
+    "0.1.0": "2014-09-22T01:58:51.592Z",
+    "0.1.1": "2014-09-22T03:37:27.931Z",
+    "1.0.0": "2015-01-24T10:16:54.470Z",
+    "1.1.0": "2015-01-24T10:33:21.598Z",
+    "1.1.1": "2015-03-05T18:37:07.633Z"
+  },
+  "versions": {
+    "0.1.0": {
+      "dist": {
+        "integrity": "sha512-WWl3iAruYOePW5iMf0IMcPiTsOTOu/FFsPyfx/ywixw7VmN6dI3/8/rgo4pdN6kVVjC5ByZ0Zk8xHLGEUSCdYA==",
+        "shasum": "4407a37aec259352affb5548886744ba4903f8bd",
+        "signatures": [
+          {
+            "keyid": "SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA",
+            "sig": "MEUCIQCGbjmJymNMyy+kX9QMWNiNDpyXcRARCBG/qWG5AH3BHwIgYPJPxD0DLlmMlQ82J2/kw9xjNGwnqmZwv1iu2dhCtQo="
+          }
+        ],
+        "tarball": "https://registry.npmjs.org/is-number/-/is-number-0.1.0.tgz"
+      },
+      "licenses": [
+        {
+          "type": "MIT",
+          "url": "https://github.com/jonschlinkert/is-number/blob/master/LICENSE-MIT"
+        }
+      ],
+      "name": "is-number",
+      "version": "0.1.0"
+    },
+    "0.1.1": {
+      "dist": {
+        "integrity": "sha512-la5kPULwIgkSSaZj9w7/A1uHqOBAgOhDUKQ5CkfL8LZ4Si6r4+2D0hI6b4o60MW4Uj2yNJARWIZUDPxlvOYQcw==",
+        "shasum": "69a7af116963d47206ec9bd9b48a14216f1e3806",
+        "signatures": [
+          {
+            "keyid": "SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA",
+            "sig": "MEUCIGGOUnPaovBe5O7zmgOovRl4e6Dzx6aMobYRtKHOiWV+AiEA4Qufb/miuS6rDGp7Zd20/e0JoxviUgTnqu21xGF2DhY="
+          }
+        ],
+        "tarball": "https://registry.npmjs.org/is-number/-/is-number-0.1.1.tgz"
+      },
+      "licenses": [
+        {
+          "type": "MIT",
+          "url": "https://github.com/jonschlinkert/is-number/blob/master/LICENSE-MIT"
+        }
+      ],
+      "name": "is-number",
+      "version": "0.1.1"
+    },
+    "1.0.0": {
+      "dist": {
+        "integrity": "sha512-chlxkgJp4PZIiff6kUe/MWLp5+soELWNYA2IsOTus1YwKj8d9JZS6QsU7Ryqwhb1f4i0nQ5SsoUj6d5kGgq0KQ==",
+        "shasum": "de821e3936a8996badeb879ca6f93605e769d498",
+        "signatures": [
+          {
+            "keyid": "SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA",
+            "sig": "MEUCIQD2AOAMGpyuvqtfmVFBdULwtBCwI1cATJ1E2SXCu7KrqAIgN3FVeMU5CjRuw21s50tzEalrZmgvbJxkjizEvjLl+Xk="
+          }
+        ],
+        "tarball": "https://registry.npmjs.org/is-number/-/is-number-1.0.0.tgz"
+      },
+      "license": {
+        "type": "MIT",
+        "url": "https://github.com/jonschlinkert/is-number/blob/master/LICENSE-MIT"
+      },
+      "name": "is-number",
+      "version": "1.0.0"
+    },
+    "1.1.0": {
+      "dist": {
+        "integrity": "sha512-zRllTDrNKDRvVEhjEqDVkT9eKzC7HJ+9SFbfBdZnbjBVt9t0SwbEn0F/NSwdk5GkkEdKZA6ZQ0Hfd4akty5Pfg==",
+        "shasum": "620db9e22fded44d43d8e3e47044319083d31855",
+        "signatures": [
+          {
+            "keyid": "SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA",
+            "sig": "MEYCIQDnVnl9/SgNEemmb1M0T1tlfm4YRTqvWw3ja961FsqrVAIhANd7v0o1uT3CVfC9pzaFfvmwZcKBnxD+UHWlKvlIU4SJ"
+          }
+        ],
+        "tarball": "https://registry.npmjs.org/is-number/-/is-number-1.1.0.tgz"
+      },
+      "license": {
+        "type": "MIT",
+        "url": "https://github.com/jonschlinkert/is-number/blob/master/LICENSE-MIT"
+      },
+      "name": "is-number",
+      "version": "1.1.0"
+    },
+    "1.1.1": {
+      "dist": {
+        "integrity": "sha512-3/f2eabVTjIGjSVaQIIv33g1d2tYdSUnCNJuPpHcjwRzx8A2IPtCB2ayK2R3aS7SCF/LHlTjdaRjNmfG+RpFlA==",
+        "shasum": "e393e7ec07c17770dbb67941e7f89c675feb110f",
+        "signatures": [
+          {
+            "keyid": "SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA",
+            "sig": "MEQCIA1MN/tZFRjbwiG0H63P4dD6Qsem1lVPlOlJuJfdJP8iAiAoX6Lk3FLlI0dqigZPFyFZi1CXFk0W8dN9yJw7P2IW+Q=="
+          }
+        ],
+        "tarball": "https://registry.npmjs.org/is-number/-/is-number-1.1.1.tgz"
+      },
+      "license": {
+        "type": "MIT",
+        "url": "https://github.com/jonschlinkert/is-number/blob/master/LICENSE"
+      },
+      "name": "is-number",
+      "version": "1.1.1"
+    }
+  }
+}
