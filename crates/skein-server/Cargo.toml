@@ -13,6 +13,7 @@ path = "src/main.rs"
 [dependencies]
 skein-store.workspace = true
 skein-control.workspace = true
+skein-license.workspace = true
 axum = "0.7"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "time", "sync"] }
 bytes = "1"
@@ -28,5 +29,6 @@ clap = { version = "4", features = ["derive"] }
 
 [dev-dependencies]
 skein-testkit.workspace = true
+skein-license = { workspace = true, features = ["issue"] }
 postgres.workspace = true
 ureq.workspace = true

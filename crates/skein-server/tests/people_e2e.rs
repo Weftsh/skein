@@ -621,3 +621,47 @@ fn the_session_probe_answers_either_way() {
     assert_eq!(me["username"], "admin");
     assert_eq!(server.get("/api/v1/session", "skein_bad_token").0, 401);
 }
+
+/// The audit log records what a change *changed*. A field the request did
+/// not touch is not written down as `null` — which reads as "cleared" —
+/// a display name is recorded when it is the change, and a password is
+/// recorded as changed, never as itself.
+#[test]
+fn an_update_is_audited_as_what_it_changed() {
+    let bucket = Minio::shared().bucket("people-audit");
+    let server = spawn(&bucket.base_url, "people-audit");
+    let admin = server.bootstrap("acme");
+    let (id, _) = server.person(&admin, "rita", "reader", &["org:read"]);
+    let path = format!("/api/v1/users/{id}");
+    for body in [
+        serde_json::json!({ "display_name": "Rita R." }),
+        serde_json::json!({ "role": "publisher" }),
+        serde_json::json!({ "password": "a-long-enough-password" }),
+    ] {
+        let (s, out) = server.req("PATCH", &path, &admin, Some(body));
+        assert_eq!(s, 200, "{out}");
+    }
+    let (_, log) = server.get("/api/v1/audit", &admin);
+    let updates: Vec<&serde_json::Value> = log["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["action"] == "user.update")
+        .map(|e| &e["context"])
+        .collect();
+    // Newest first.
+    let keys = |c: &serde_json::Value| {
+        let mut k: Vec<String> = c.as_object().unwrap().keys().cloned().collect();
+        k.retain(|k| k != "token_id");
+        k.sort();
+        k
+    };
+    assert_eq!(updates.len(), 3, "{log}");
+    assert_eq!(keys(updates[0]), ["password", "user"], "{}", updates[0]);
+    assert_eq!(updates[0]["password"], "changed");
+    assert!(!log.to_string().contains("a-long-enough-password"));
+    assert_eq!(keys(updates[1]), ["role", "user"], "{}", updates[1]);
+    assert_eq!(updates[1]["role"], "publisher");
+    assert_eq!(keys(updates[2]), ["display_name", "user"], "{}", updates[2]);
+    assert_eq!(updates[2]["display_name"], "Rita R.");
+}

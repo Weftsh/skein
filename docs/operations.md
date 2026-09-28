@@ -56,10 +56,29 @@ Everything is the environment.
 | `SKEIN_GC_INTERVAL_SECS` | `3600` | How often unreferenced package bytes are collected. `0` switches the collector off. |
 | `SKEIN_GC_GRACE_SECS` | `3600` | How long bytes must have been unreferenced before they are collected. A publish writes its bytes before its row, so this must comfortably exceed the longest publish. |
 | `SKEIN_DB_LOCK_TIMEOUT_MS` | `5000` | How long a write waits on another's lock before failing rather than hanging a request. |
+| `SKEIN_LICENSE_KEY` | *(none)* | Your Skein licence key. Applied on start when it differs from the one last applied, so a key installed from the UI stands until this changes. See [licensing.md](licensing.md). |
+| `SKEIN_LICENSE_ENDPOINT` | `https://license.weft.sh/v1/check` | Where an online licence's daily check goes. Must be HTTPS. |
 
 Skein serves plain HTTP. Put TLS in front of it — a load balancer, or a
 reverse proxy such as Caddy or nginx — and set `SKEIN_PUBLIC_URL` to the
 `https://` address people use.
+
+### Outbound connections
+
+Skein connects to its database and bucket, and to two things on the
+internet, both optional:
+
+- the npm upstream (`SKEIN_UPSTREAM_NPM`), only when npm is in `proxy`
+  mode;
+- `license.weft.sh`, once a day, only with an online licence key — see
+  [licensing.md](licensing.md).
+
+Both connect **directly**: `HTTPS_PROXY` is not read today. The HTTP
+client's own proxy support ignores `NO_PROXY`, so honouring it would
+also send loopback and internal addresses through the proxy. An install
+that reaches the internet only through a forward proxy cannot use npm's
+proxy mode, and its licence check does not complete — which becomes a
+warning after seven days and never a refusal.
 
 ## Setting up
 

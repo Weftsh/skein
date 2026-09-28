@@ -1,0 +1,9 @@
+{
+  "name": "skein-ui-walk",
+  "private": true,
+  "description": "The browser walk through Skein's UI, driven by tests/ui_e2e.rs",
+  "type": "module",
+  "devDependencies": {
+    "playwright": "1.56.1"
+  }
+}

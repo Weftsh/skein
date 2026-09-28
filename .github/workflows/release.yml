@@ -57,6 +57,15 @@ jobs:
           bin=target/${{ matrix.target }}/release/skein
           file "$bin" | grep -Eq "statically linked|static-pie linked"
           "$bin" --version
+      # A build that trusts no licence signing key reads every customer's
+      # key as `unknown_signing_key`. Asked of the binary about to ship,
+      # not of the source it was built from.
+      - name: The binary trusts Weft's licence signing keys
+        run: |
+          bin=target/${{ matrix.target }}/release/skein
+          n=$("$bin" admin license keys --json | jq '.trusted_key_ids | length')
+          test "$n" -gt 0 || { echo "::error::RELEASE_SIGNING_KEYS in crates/skein-license/src/trusted.rs is empty"; exit 1; }
+          echo "$n licence signing key(s)"
       - name: Package
         run: |
           mkdir -p dist/${{ matrix.arch }}

@@ -345,6 +345,46 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX package_uploads_stale ON package_uploads(updated_at);
     "#,
+    // 0002 — the commercial licence.
+    //
+    // Weft Sandboxes' model (sandy's control-plane `license/service.ts`,
+    // which keeps the same facts in two meta items), counting seats —
+    // people who can sign in — where sandy counts concurrent sandboxes.
+    r#"
+    -- One row, like `orgs`: the key in force and what the daily check
+    -- last heard. Created here, so `installed_at` is when this install
+    -- started keeping licence state and day one is never "overdue".
+    CREATE TABLE license (
+        singleton         BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
+        key               TEXT,
+        -- The SKEIN_LICENSE_KEY last applied. A key installed through the
+        -- API stands until the environment's key *changes*, rather than
+        -- being overwritten by the same stale variable on every restart.
+        configured_key    TEXT,
+        installed_at      BIGINT NOT NULL,
+        last_check_at     BIGINT,
+        last_check_status TEXT CHECK (last_check_status IN
+                              ('active','lapsed','revoked','unknown')),
+        notice            TEXT,
+        last_check_error  TEXT,
+        -- The daily check is claimed here, not decided per process: ten
+        -- replicas behind a load balancer, or one restarted ten times,
+        -- still send one check a day.
+        check_claimed_at  BIGINT,
+        -- The most seats seen since the last successful check: what it
+        -- reports as `peakSeats`.
+        peak_since_check  BIGINT NOT NULL DEFAULT 0
+    );
+    INSERT INTO license (installed_at)
+        VALUES ((EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::BIGINT);
+
+    -- The most seats seen in each UTC calendar month, the last thirteen
+    -- kept: what an offline licence's annual true-up reports.
+    CREATE TABLE license_monthly_peaks (
+        month TEXT PRIMARY KEY CHECK (month ~ '^[0-9]{4}-[0-9]{2}$'),
+        peak  BIGINT NOT NULL
+    );
+    "#,
 ];
 
 /// The sync `postgres` client drives its own internal runtime with

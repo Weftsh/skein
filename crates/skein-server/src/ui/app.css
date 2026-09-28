@@ -164,6 +164,10 @@ pre.code {
 .notice { border: 1px solid var(--border); border-left: 3px solid var(--brand); border-radius: var(--radius); padding: 10px 14px; background: var(--surface-1); }
 .notice.warn { border-left-color: var(--status-warning); }
 .notice.bad { border-left-color: var(--status-serious); }
+.notice.banner { margin-bottom: 18px; }
+ul.plain { margin: 0; padding-left: 18px; }
+ul.plain li + li { margin-top: 4px; }
+textarea.mono { font-family: var(--font-mono); font-size: 12.5px; width: 100%; resize: vertical; word-break: break-all; }
 .secret { font-family: var(--font-mono); word-break: break-all; background: var(--surface-2); border: 1px dashed var(--brand); border-radius: var(--radius); padding: 10px 12px; }
 
 .grid.stats { grid-template-columns: repeat(3, minmax(0, 1fr)); }

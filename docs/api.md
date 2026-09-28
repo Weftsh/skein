@@ -88,6 +88,17 @@ See [policy.md](policy.md) for what each control means.
 The last active admin cannot be demoted, disabled or deleted: those
 requests answer **409**.
 
+## The licence (`org:admin`)
+
+| | |
+|---|---|
+| `GET /api/v1/license` | what the licence says: `state`, its terms, `seats`, `over_cap`, `release_access`, `warnings`, the last check, `monthly_peaks`. Never the key |
+| `PUT /api/v1/license` | `{"key"}` — install a key. One that does not verify is a **400** naming why, and the key in force stays |
+| `POST /api/v1/license/check` | run the daily check now; **409** for an offline licence or no valid key |
+
+Nothing else in the API — or anywhere — consults the licence. See
+[licensing.md](licensing.md).
+
 ## Health
 
 `GET /healthz` (liveness) and `GET /readyz` (the database, the bucket,

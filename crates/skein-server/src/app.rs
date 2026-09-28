@@ -10,7 +10,7 @@
 //! organization exists. From then on it is read once and kept: its id is
 //! the store prefix, and ids do not change.
 
-use crate::api::{npm_api, packages_api, people_api, registry_door};
+use crate::api::{license_api, npm_api, packages_api, people_api, registry_door};
 use axum::extract::{Request, State};
 use axum::http::{header, HeaderValue, Method, StatusCode};
 use axum::middleware::{self, Next};
@@ -33,18 +33,26 @@ pub struct AppState {
     /// Echoed on `/healthz`, so a test harness can prove the server on a
     /// port is the one it started.
     pub instance: Option<String>,
+    /// The commercial licence: warnings only, never a refusal.
+    pub license: crate::license::Licensing,
     org: OnceLock<Org>,
 }
 
 pub type SharedState = Arc<AppState>;
 
 impl AppState {
-    pub fn new(db: ControlDb, store_url: String, public_url: String) -> AppState {
+    pub fn new(
+        db: ControlDb,
+        store_url: String,
+        public_url: String,
+        license: crate::license::Licensing,
+    ) -> AppState {
         AppState {
             db,
             store_url,
             public_url,
             instance: std::env::var("SKEIN_INSTANCE_ID").ok(),
+            license,
             org: OnceLock::new(),
         }
     }
@@ -124,6 +132,8 @@ pub fn router(state: SharedState) -> Router {
         .route("/overview", get(people_api::overview))
         .route("/org", put(people_api::rename_org))
         .route("/audit", get(people_api::audit_log))
+        .route("/license", get(license_api::show).put(license_api::install))
+        .route("/license/check", post(license_api::check_now))
         .route(
             "/ecosystems",
             get(packages_api::ecosystems).put(packages_api::set_ecosystem),
@@ -296,6 +306,7 @@ pub async fn serve(state: SharedState, bind: &str) -> Result<(), String> {
         .map_err(|e| format!("bind {bind}: {e}"))?;
     eprintln!("skein: serving on {bind} (public URL {})", state.public_url);
     crate::gc::spawn(state.clone());
+    crate::license::spawn(state.clone());
     axum::serve(listener, router(state))
         .with_graceful_shutdown(shutdown())
         .await

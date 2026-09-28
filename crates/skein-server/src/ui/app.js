@@ -162,15 +162,21 @@ async function api(method, path, body) {
 }
 
 // Run an action, reporting a failure as a toast rather than an
-// unhandled rejection nobody sees.
+// unhandled rejection nobody sees. It still throws, so the handler that
+// awaited it stops there — a refused key does not go on to render as if
+// it had been installed — and the throw is marked as already reported,
+// so it does not then surface as an uncaught error in the console.
 async function act(fn, done) {
   try { const out = await fn(); if (done) toast(done, "good"); return out; }
-  catch (e) { toast(e.message, "bad"); throw e; }
+  catch (e) { toast(e.message, "bad"); e.reported = true; throw e; }
 }
+window.addEventListener("unhandledrejection", (ev) => {
+  if (ev.reason && ev.reason.reported) ev.preventDefault();
+});
 
 // ---------------------------------------------------------------- state
 
-const state = { me: null, overview: null };
+const state = { me: null, overview: null, license: null };
 const isAdmin = () => !!state.me && state.me.scopes.includes("org:admin");
 const canWrite = () => !!state.me && (isAdmin() || state.me.scopes.includes("package:write"));
 const base = () => (state.me && state.me.public_url) || location.origin;
@@ -213,12 +219,17 @@ async function render() {
   if (!state.overview) {
     try { state.overview = await api("GET", "/overview"); } catch { state.overview = null; }
   }
+  // Admins see what the licence says on every page. It never stops
+  // anything, which is exactly why it has to be visible somewhere.
+  if (isAdmin() && !state.license) {
+    try { state.license = await api("GET", "/license"); } catch { state.license = null; }
+  }
   const route = ROUTES.find(([re]) => re.test(location.hash || "#/"));
   const content = h("div", { class: "content" }, h("p", { class: "muted" }, "Loading…"));
   app.replaceChildren(h("div", { class: "shell" }, sidebar(), h("main", { class: "main" }, content)));
   try {
     const page = route ? await route[1](location.hash.match(route[0])) : notFound();
-    content.replaceChildren(...[page].flat().filter(Boolean));
+    content.replaceChildren(...[licenseBanner(), page].flat().filter(Boolean));
   } catch (e) {
     content.replaceChildren(h("div", { class: "notice bad" }, e.message));
   }
@@ -794,12 +805,77 @@ async function activityPage() {
         h("td", { class: "nowrap" }, when(e.at)),
         h("td", {}, e.username || h("span", { class: "muted" }, e.principal)),
         h("td", { class: "mono" }, e.action),
-        h("td", { class: "wrap mono muted small" }, e.context ? JSON.stringify(e.context) : "")))))) : h("p", { class: "muted" }, "Nothing yet.")),
+        // A field recorded as null is one that was not given; it says
+        // nothing, and "null" on the page reads as a value.
+        h("td", { class: "wrap mono muted small" }, e.context ? JSON.stringify(e.context, (k, v) => (v === null ? undefined : v)) : "")))))) : h("p", { class: "muted" }, "Nothing yet.")),
   ];
+}
+
+// -------------------------------------------------------------- licence
+
+function licenseBanner() {
+  const l = state.license;
+  if (!isAdmin() || !l || !l.warnings.length || location.hash === "#/settings") return null;
+  const more = l.warnings.length > 1 ? ` (and ${l.warnings.length - 1} more)` : "";
+  return h("div", { class: "notice warn banner", role: "status" },
+    h("strong", {}, "Licence. "), l.warnings[0] + more, " ",
+    h("a", { href: "#/settings" }, "Details"));
+}
+
+const LICENSE_STATE = {
+  unlicensed: ["", "no key"],
+  invalid: ["bad", "not valid"],
+  active: ["good", "active"],
+  expiring: ["warn", "expiring"],
+  lapsed: ["warn", "lapsed"],
+};
+
+function licenseCard(l) {
+  const [cls, label] = LICENSE_STATE[l.state] || ["", l.state];
+  const row = (k, ...v) => h("tr", {}, h("td", { class: "muted nowrap" }, k), h("td", { class: "wrap" }, ...v));
+  const key = h("textarea", { rows: 3, required: true, placeholder: "weft_lic_v1.…", spellcheck: "false", autocomplete: "off", class: "mono" });
+  const refresh = (r) => { state.license = r; render(); };
+  const terms = l.license_id ? [
+    row("Licence", h("span", { class: "mono" }, l.license_id), ` — ${l.tier} tier${l.trial ? " (trial)" : ""}, issued to `, h("strong", {}, l.entity)),
+    row("Expires", l.expires_at.slice(0, 10), !l.release_access && h("span", { class: "badge warn", style: "margin-left:8px" }, "no new releases")),
+    row("Reporting", l.mode === "offline"
+      ? "Offline: Skein makes no calls to Weft. The monthly peaks below are what the annual true-up reports."
+      : "Online: one check a day sends the licence id, this version and the most seats since the last check — nothing else."),
+    l.mode === "online" && row("Last check", l.last_check_at ? `${when(Date.parse(l.last_check_at))} — ${l.last_check_status}` : "not yet",
+      l.last_check_error && h("div", { class: "muted small" }, l.last_check_error)),
+  ] : [];
+  return h("div", { class: "card" },
+    h("div", { class: "row", style: "justify-content:space-between" },
+      h("h2", { style: "margin:0" }, "Licence"), h("span", { class: `badge ${cls}` }, label)),
+    h("p", { class: "lede" }, "A licence never stops Skein. Whatever it says, everybody keeps installing, publishing and signing in; what it affects is signed updates from Weft."),
+    l.notice && h("div", { class: "notice" }, h("strong", {}, "From Weft. "), l.notice),
+    l.warnings.length ? h("div", { class: "notice warn" }, h("ul", { class: "plain" }, l.warnings.map((w) => h("li", {}, w)))) : null,
+    h("table", {}, h("tbody", {},
+      terms,
+      row("Seats", `${l.seats} ${l.seats === 1 ? "person" : "people"} can sign in`,
+        l.license_id ? (l.max_seats === null ? "; the licence has no seat cap" : `; the licence covers ${l.max_seats}`) : "",
+        h("div", { class: "muted small" }, "Service accounts cannot sign in and are not seats. Most this month: ", String(l.peak_seats_this_month), ".")),
+      l.monthly_peaks.length > 1 && row("By month", h("span", { class: "mono small" }, l.monthly_peaks.map((m) => `${m.month}: ${m.peak}`).join(" · "))))),
+    h("form", {
+      class: "stack",
+      style: "margin-top:14px",
+      onsubmit: async (e) => {
+        e.preventDefault();
+        refresh(await act(() => api("PUT", "/license", { key: key.value }), "Licence key installed"));
+      },
+    },
+      h("label", { class: "field" }, l.license_id ? "Replace the key" : "Install a key",
+        h("span", { class: "hint" }, l.key_source === "environment" ? "The key in force came from SKEIN_LICENSE_KEY. One installed here stands until that variable changes." : "Paste the key Weft sent you."),
+        key),
+      h("div", { class: "row" },
+        h("button", { class: "btn primary", type: "submit" }, "Install"),
+        l.mode === "online" && h("button", { class: "btn", type: "button", onclick: async () => refresh(await act(() => api("POST", "/license/check"), "Checked")) }, "Check now"))));
 }
 
 async function settingsPage() {
   const ov = await api("GET", "/overview");
+  const lic = await api("GET", "/license");
+  state.license = lic;
   const name = h("input", { value: ov.org.name, required: true, pattern: "[a-z0-9-]+" });
   return [
     pageHead("Settings"),
@@ -813,6 +889,7 @@ async function settingsPage() {
         h("tr", {}, h("td", { class: "muted" }, "Public URL"), h("td", { class: "mono" }, ov.public_url)),
         h("tr", {}, h("td", { class: "muted" }, "Version"), h("td", { class: "mono" }, ov.version)),
         h("tr", {}, h("td", { class: "muted" }, "Stored"), h("td", { class: "mono" }, bytes(ov.stored_bytes)))))),
+    licenseCard(lic),
   ];
 }
 

@@ -16,6 +16,7 @@ pub mod audit;
 pub mod auth;
 pub mod db;
 pub mod ids;
+pub mod license;
 pub mod packages;
 pub mod registry;
 pub mod sessions;

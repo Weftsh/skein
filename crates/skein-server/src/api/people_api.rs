@@ -484,17 +484,23 @@ pub async fn update_user(
             return json_error(StatusCode::BAD_REQUEST, e);
         }
     }
-    audit(
-        &state,
-        &caller,
-        "user.update",
-        serde_json::json!({
-            "user": target.username,
-            "role": body.role,
-            "disabled": body.disabled,
-            "password": body.password.is_some(),
-        }),
-    );
+    // What this request changed, and only that: a field it did not touch
+    // recorded as `null` reads as "cleared" to whoever audits it later.
+    // A password is recorded as having changed, never as what it is.
+    let mut changed = serde_json::json!({ "user": target.username });
+    if let Some(r) = &body.role {
+        changed["role"] = serde_json::json!(r);
+    }
+    if let Some(d) = body.disabled {
+        changed["disabled"] = serde_json::json!(d);
+    }
+    if body.password.is_some() {
+        changed["password"] = serde_json::json!("changed");
+    }
+    if let Some(n) = &body.display_name {
+        changed["display_name"] = serde_json::json!(n);
+    }
+    audit(&state, &caller, "user.update", changed);
     match users::by_id(&state.db, &target.id) {
         Ok(Some(u)) => Json(user_json(&u)).into_response(),
         Ok(None) => authx::not_found(),

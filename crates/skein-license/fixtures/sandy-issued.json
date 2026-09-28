@@ -1,0 +1,20 @@
+{
+  "provenance": {
+    "recorded_by": "scripts/record-license-fixtures.mjs",
+    "sandy_commit": "b41a71688f6f16350c682108c6ffd8b7fbad213f",
+    "node": "v22.22.2",
+    "recorded_at": "2026-09-28T00:52:15.991Z"
+  },
+  "kid": "fixture-1",
+  "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAS6ghKplPxE9TwX9CMEyvrnbiKZXUKQ0Jt54xOCNC4TU=\n-----END PUBLIC KEY-----\n",
+  "keys": {
+    "skein_team": "weft_lic_v1.eyJ2IjoxLCJraWQiOiJmaXh0dXJlLTEiLCJsaWQiOiJsaWNfZml4dHVyZV8wMDEiLCJlbnRpdHkiOiJGaXh0dXJlIENvcnAiLCJ0aWVyIjoidGVhbSIsImFjY291bnRzIjpbXSwibWF4Q29uY3VycmVudCI6bnVsbCwibW9kZSI6Im9ubGluZSIsImlhdCI6IjIwMjYtMTAtMDFUMDA6MDA6MDAuMDAwWiIsImV4cCI6IjIwMjctMTAtMDFUMDA6MDA6MDAuMDAwWiIsInByb2R1Y3QiOiJza2VpbiIsIm1heFNlYXRzIjoyNX0.ECuIApYP2ThNtKk93-nl74EECR6nGvYj-HrBi_0vYtLi7g_iXOHJ8dpLP6zbbB4PkU3QBtQ6MNBbe6BN0avJDQ",
+    "skein_enterprise_offline_uncapped": "weft_lic_v1.eyJ2IjoxLCJraWQiOiJmaXh0dXJlLTEiLCJsaWQiOiJsaWNfZml4dHVyZV8wMDIiLCJlbnRpdHkiOiJGaXh0dXJlIENvcnAiLCJ0aWVyIjoiZW50ZXJwcmlzZSIsImFjY291bnRzIjpbXSwibWF4Q29uY3VycmVudCI6bnVsbCwibW9kZSI6Im9mZmxpbmUiLCJpYXQiOiIyMDI2LTEwLTAxVDAwOjAwOjAwLjAwMFoiLCJleHAiOiIyMDI3LTEwLTAxVDAwOjAwOjAwLjAwMFoiLCJwcm9kdWN0Ijoic2tlaW4iLCJtYXhTZWF0cyI6bnVsbCwidHJpYWwiOnRydWV9.5hvgy9suHhFUw8-gBqKfQV95aajc-nc4dhVI9uddzIAMhXBSZYGy8h1V9eBrW0zboYUCV4j-TQQgL3R-MYJVBg",
+    "sandboxes_team": "weft_lic_v1.eyJ2IjoxLCJraWQiOiJmaXh0dXJlLTEiLCJsaWQiOiJsaWNfZml4dHVyZV8wMDMiLCJlbnRpdHkiOiJGaXh0dXJlIENvcnAiLCJ0aWVyIjoidGVhbSIsImFjY291bnRzIjpbXSwibWF4Q29uY3VycmVudCI6NTAsIm1vZGUiOiJvbmxpbmUiLCJpYXQiOiIyMDI2LTEwLTAxVDAwOjAwOjAwLjAwMFoiLCJleHAiOiIyMDI3LTEwLTAxVDAwOjAwOjAwLjAwMFoifQ.faojEdLwQNyFmQbQiFNteYpsox9cKJNawHP1PvHqMXmUFJgLazX6tD1hiiKZ_kUE-EBaeNwc2cJBr-FgTV_0Bw"
+  },
+  "sandy_verdicts": {
+    "skein_team": "ok",
+    "skein_enterprise_offline_uncapped": "ok",
+    "sandboxes_team": "ok"
+  }
+}

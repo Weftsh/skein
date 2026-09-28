@@ -76,6 +76,8 @@ Skein username and password.
 - [docs/npm.md](docs/npm.md) — npm: configuration, publishing, yanking, the proxy
 - [docs/policy.md](docs/policy.md) — the admission policy for what enters from upstream
 - [docs/operations.md](docs/operations.md) — configuration, health, the bucket, recovery
+- [docs/licensing.md](docs/licensing.md) — the licence key, seats, and exactly what the daily check sends
+- [docs/api.md](docs/api.md) — the REST API
 
 ## Layout
 
@@ -86,6 +88,8 @@ crates/skein-control   PostgreSQL: packages, versions, admission policy,
 crates/skein-server    the `skein` binary: the registry doors, the REST
                        API, the collector, and the UI (src/ui — three
                        files, no build step, compiled into the binary)
+crates/skein-license   the licence: offline Ed25519 key verification, what it
+                       means today, and the daily check — never a refusal
 crates/skein-testkit   hermetic test harnesses: PostgreSQL, MinIO, a fake
                        npm upstream, a spawned server
 ```
@@ -98,12 +102,19 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace                  # needs PostgreSQL binaries installed
 SKEIN_REQUIRE_CLIENTS=npm cargo test -p skein-server --test clients_e2e
+
+# The UI in a real Chromium, every page plus the licence flow:
+(cd crates/skein-server/tests/ui && npm ci && npx playwright install chromium)
+SKEIN_REQUIRE_CLIENTS=browser cargo test -p skein-server --test ui_e2e
 ```
 
 [CLAUDE.md](CLAUDE.md) is the working discipline: what a change has to
 survive, and what to do when you find something wrong.
 
 ## License
+
+A licence key from Weft is what receives releases and security patches;
+it never stops Skein serving. See [docs/licensing.md](docs/licensing.md).
 
 Skein is published under the [Functional Source License, Version 1.1,
 ALv2 Future License](LICENSE.md): you may read, audit, modify and run it

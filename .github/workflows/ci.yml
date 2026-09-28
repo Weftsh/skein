@@ -85,6 +85,52 @@ jobs:
           SKEIN_REQUIRE_CLIENTS: npm,python3
         run: cargo test -p skein-server --test clients_e2e -- --nocapture
 
+  ui:
+    name: UI in a real browser
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.96.0"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ hashFiles('Cargo.toml') }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: MinIO version
+        id: minio
+        run: echo "release=$(cat .minio-version)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: .testkit/bin/minio
+          key: minio-linux-amd64-${{ steps.minio.outputs.release }}
+      - name: Fetch MinIO (testkit backend)
+        run: scripts/fetch-minio.sh
+      # The Playwright the lockfile pins, and the Chromium it was built for.
+      - name: Playwright
+        working-directory: crates/skein-server/tests/ui
+        run: |
+          npm ci --no-audit --no-fund
+          npx playwright install --with-deps chromium
+      # Every page, dark and light, desktop and phone, plus the licence
+      # flow: 0 problems, or red.
+      - name: Walk the UI
+        env:
+          SKEIN_REQUIRE_CLIENTS: browser
+          SKEIN_UI_SHOTS: ${{ runner.temp }}/ui-shots
+        run: |
+          mkdir -p "$SKEIN_UI_SHOTS"
+          cargo test -p skein-server --test ui_e2e -- --nocapture
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ui-screenshots
+          path: ${{ runner.temp }}/ui-shots
+          if-no-files-found: ignore
+
   image:
     name: Image smoke
     runs-on: ubuntu-latest

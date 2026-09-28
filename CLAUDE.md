@@ -16,6 +16,8 @@ fails without it.**
 |---|---|---|
 | **test** | `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace` — against a real PostgreSQL and a real MinIO, never a mock | CI job `test` |
 | **clients** | the real `npm` (and each client as its door lands) publishes to and installs from a real server, and a refusal reaches the person as a sentence | CI job `clients`, `crates/skein-server/tests/clients_e2e.rs` |
+| **ui** | every page, dark and light, desktop and phone, in a real Chromium: no console error the walk did not provoke, no uncaught error, nothing scrolling sideways, no `null` rendered as text, markup from data never runs — and the licence flow does what it says | CI job `ui`, `crates/skein-server/tests/ui_e2e.rs` driving `tests/ui/walk.mjs` |
+| **image** | the image builds, Compose brings it up healthy, and the real npm publishes and installs through it | CI job `image`, `scripts/smoke.sh` |
 
 Locally:
 
@@ -25,6 +27,8 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace             # needs PostgreSQL binaries on the machine
 SKEIN_REQUIRE_CLIENTS=npm cargo test -p skein-server --test clients_e2e
+(cd crates/skein-server/tests/ui && npm ci && npx playwright install chromium)
+SKEIN_REQUIRE_CLIENTS=browser cargo test -p skein-server --test ui_e2e
 ```
 
 A client that is not installed prints a **NOTE** and claims nothing. A
@@ -60,6 +64,15 @@ registry door is the security boundary, and every door keeps it:
 
 A new door gets a negative suite, and every negative case ends by
 proving the server is still healthy and serving.
+
+## The licence never refuses
+
+`skein-license` and `src/license.rs` produce warnings and nothing else.
+No door, sign-in or admin action may read the licence, and there is
+deliberately no "allowed" answer to read. `license_e2e.rs` holds it:
+under every licence state, publish, install, sign-in and adding a person
+still work. What leaves the install is `CHECK_FIELDS` — three fields —
+and a fourth fails the suite.
 
 ## When you find a bug or a gap
 

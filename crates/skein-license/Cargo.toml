@@ -1,0 +1,22 @@
+[package]
+name = "skein-license"
+description = "Skein's commercial licence: offline Ed25519 key verification, status evaluation and the daily check"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+publish.workspace = true
+
+[features]
+# Signing keys. Weft's billing automation issues production keys with the
+# `weft-license` tool (sandy's packages/license); this is for tests.
+issue = []
+
+[dependencies]
+ed25519-dalek = { version = "2", features = ["pkcs8", "pem"] }
+base64 = "0.22"
+serde = { workspace = true }
+serde_json = { workspace = true }
+ureq = { workspace = true }
+
+[dev-dependencies]
+skein-license = { path = ".", features = ["issue"] }

@@ -9,6 +9,7 @@
 //! skein admin mint-token      mint an API token for somebody
 //! skein admin set-role        change what somebody may do
 //! skein admin gc              collect unreferenced package bytes now
+//! skein admin license …       the commercial licence: status, install, check, keys
 //! ```
 //!
 //! Configuration is the environment — see `docs/operations.md`.
@@ -22,6 +23,7 @@ mod api;
 mod app;
 mod authx;
 mod gc;
+mod license;
 mod registry;
 mod ui;
 
@@ -115,6 +117,32 @@ enum Admin {
         #[arg(long, default_value_t = 3600)]
         grace_secs: u64,
     },
+    /// The commercial licence. It never stops Skein; these say what it says.
+    #[command(subcommand)]
+    License(LicenseCmd),
+}
+
+#[derive(Subcommand)]
+enum LicenseCmd {
+    /// What the licence says: its terms, seats, warnings and the last check.
+    Status {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Install a licence key, read from stdin so it stays out of the
+    /// process list and the shell history.
+    Install,
+    /// Run the daily check now.
+    Check {
+        #[arg(long)]
+        json: bool,
+    },
+    /// The signing keys this build trusts. Needs no database: the release
+    /// workflow runs it on the binary it is about to publish.
+    Keys {
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 fn main() {
@@ -151,10 +179,13 @@ fn state() -> Result<app::SharedState, String> {
         .ok()
         .filter(|v| !v.trim().is_empty())
         .unwrap_or_else(|| "http://localhost:8080".to_string());
+    let license = license::Licensing::from_env()?;
+    license.init(&db)?;
     Ok(Arc::new(app::AppState::new(
         db,
         store_url.trim_end_matches('/').to_string(),
         public_url.trim_end_matches('/').to_string(),
+        license,
     )))
 }
 
@@ -201,6 +232,17 @@ fn user(db: &ControlDb, username: &str) -> Result<skein_control::users::User, St
 }
 
 fn admin(cmd: Admin) -> Result<(), String> {
+    if let Admin::License(LicenseCmd::Keys { json }) = cmd {
+        let ids = license::Licensing::from_env()?.trusted_key_ids();
+        if json {
+            println!("{}", serde_json::json!({ "trusted_key_ids": ids }));
+        } else if ids.is_empty() {
+            println!("this build trusts no licence signing keys");
+        } else {
+            println!("{}", ids.join("\n"));
+        }
+        return Ok(());
+    }
     let db = open_db()?;
     match cmd {
         Admin::Bootstrap {
@@ -356,5 +398,97 @@ fn admin(cmd: Admin) -> Result<(), String> {
             println!("{}", serde_json::to_string(&swept).unwrap_or_default());
             Ok(())
         }
+        Admin::License(cmd) => {
+            let lic = license::Licensing::from_env()?;
+            lic.init(&db)?;
+            let print = |r: &license::Report, json: bool| {
+                if json {
+                    println!("{}", serde_json::to_string_pretty(r).unwrap_or_default());
+                } else {
+                    print_license(r);
+                }
+            };
+            match cmd {
+                LicenseCmd::Status { json } => {
+                    print(&lic.report(&db, skein_control::ids::now_ms())?, json);
+                    Ok(())
+                }
+                LicenseCmd::Install => {
+                    let mut key = String::new();
+                    std::io::stdin()
+                        .read_to_string(&mut key)
+                        .map_err(|e| format!("read the key from stdin: {e}"))?;
+                    let lic_terms = lic
+                        .install(&db, &key)?
+                        .map_err(|r| format!("that licence key was not installed: {r}"))?;
+                    if let Some(org) = skein_control::registry::the_org(&db)? {
+                        let ctx = skein_control::audit::AuditCtx::system(&org.id, "cli");
+                        skein_control::audit::record(
+                            &db,
+                            &ctx,
+                            "license.install",
+                            Some(&serde_json::json!({
+                                "license_id": lic_terms.lid,
+                                "tier": lic_terms.tier.as_str(),
+                                "entity": lic_terms.entity,
+                            })),
+                        )?;
+                    }
+                    print(&lic.report(&db, skein_control::ids::now_ms())?, false);
+                    Ok(())
+                }
+                LicenseCmd::Check { json } => {
+                    match lic.run_check(&db, std::time::Duration::ZERO)? {
+                        license::CheckRun::NoValidKey => {
+                            return Err("there is no valid licence key to check".into())
+                        }
+                        license::CheckRun::Offline => {
+                            return Err(
+                                "this is an offline licence: Skein makes no calls for it".into()
+                            )
+                        }
+                        _ => {}
+                    }
+                    print(&lic.report(&db, skein_control::ids::now_ms())?, json);
+                    Ok(())
+                }
+                LicenseCmd::Keys { .. } => unreachable!("answered before the database"),
+            }
+        }
+    }
+}
+
+fn print_license(r: &license::Report) {
+    let s = &r.status;
+    let state = serde_json::to_value(s.state).unwrap_or_default();
+    println!("state      {}", state.as_str().unwrap_or("?"));
+    if let (Some(lid), Some(entity), Some(tier)) = (&s.license_id, &s.entity, s.tier) {
+        println!(
+            "licence    {lid}, {} tier, issued to {entity}",
+            tier.as_str()
+        );
+        if let Some(exp) = &s.expires_at {
+            println!("expires    {exp}");
+        }
+    }
+    match s.max_seats {
+        Some(cap) => println!("seats      {} of {cap}", s.seats),
+        None => println!("seats      {}", s.seats),
+    }
+    println!("this month {} at most", r.peak_seats_this_month);
+    if let Some(at) = &r.last_check_at {
+        println!(
+            "checked    {at} ({})",
+            r.last_check_status.as_deref().unwrap_or("?")
+        );
+    }
+    if let Some(e) = &r.last_check_error {
+        println!("last error {e}");
+    }
+    if let Some(n) = &r.notice {
+        println!("from Weft  {n}");
+    }
+    for w in &s.warnings {
+        println!("warning    {w}");
     }
 }

@@ -240,6 +240,21 @@ pub fn count(db: &ControlDb) -> Result<i64, String> {
         .map_err(|e| format!("count users: {e}"))
 }
 
+/// Seats: people who can sign in — a password, and not disabled. What a
+/// licence caps. A CI service account has no password and cannot sign
+/// in, so it is not a seat; nor is somebody disabled, until re-enabled.
+/// This is the one definition; the licence reads nothing else.
+pub fn seat_count(db: &ControlDb) -> Result<i64, String> {
+    db.lock()
+        .query_one(
+            "SELECT COUNT(*) FROM users \
+             WHERE password_hash IS NOT NULL AND disabled_at IS NULL",
+            &[],
+        )
+        .map(|r| r.get(0))
+        .map_err(|e| format!("count seats: {e}"))
+}
+
 /// Verify a username/password pair. `None` for every failure shape —
 /// unknown name, wrong password, disabled account, an account with no
 /// password — so sign-in cannot be used to discover who has an account.
