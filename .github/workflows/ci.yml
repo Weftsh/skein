@@ -84,3 +84,22 @@ jobs:
         env:
           SKEIN_REQUIRE_CLIENTS: npm,python3
         run: cargo test -p skein-server --test clients_e2e -- --nocapture
+
+  image:
+    name: Image smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # The artefact people run: the image builds, compose brings it up
+      # healthy, bootstrap works through `docker compose exec`, the real
+      # npm publishes and installs through it, and a real package is
+      # proxied from npmjs — which needs the image's CA store.
+      - name: Build, run and exercise the image
+        env:
+          SMOKE_UPSTREAM: "1"
+          SMOKE_DOWN: "1"
+        run: scripts/smoke.sh

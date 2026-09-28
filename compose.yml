@@ -1,0 +1,72 @@
+# Skein, PostgreSQL and MinIO on one machine.
+#
+#   docker compose up -d --build --wait
+#   docker compose exec skein skein admin bootstrap --org <your-org>
+#
+# then open http://localhost:8080 and sign in with the password it
+# printed. For production, put TLS in front of port 8080, set
+# SKEIN_PUBLIC_URL to the https:// address people use, and change every
+# password below. See docs/operations.md.
+
+services:
+  skein:
+    build: .
+    image: skein:local
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      SKEIN_DB_URL: postgres://skein:skein-change-me@postgres:5432/skein
+      SKEIN_STORE_URL: http://minio:9000/skein
+      SKEIN_STORE_CREATE_BUCKET: "true"
+      AWS_ACCESS_KEY_ID: skein
+      AWS_SECRET_ACCESS_KEY: skein-change-me-too
+      AWS_REGION: us-east-1
+      SKEIN_PUBLIC_URL: ${SKEIN_PUBLIC_URL:-http://localhost:8080}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: skein
+      POSTGRES_PASSWORD: skein-change-me
+      POSTGRES_DB: skein
+    ports:
+      - "127.0.0.1:${SKEIN_PG_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U skein"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # A byte-for-byte copy of quay.io/minio/minio at a pinned release, from
+  # github.com/weftsh/minio-mirror: MinIO no longer publishes images to
+  # Docker Hub, and quay.io refuses anonymous pulls from some networks.
+  minio:
+    image: ghcr.io/weftsh/minio:RELEASE.2025-09-07T16-13-09Z
+    restart: unless-stopped
+    command: server /data --address :9000
+    environment:
+      MINIO_ROOT_USER: skein
+      MINIO_ROOT_PASSWORD: skein-change-me-too
+      MINIO_BROWSER: "off"
+    ports:
+      - "127.0.0.1:${SKEIN_MINIO_PORT:-9000}:9000"
+    volumes:
+      - miniodata:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  pgdata:
+  miniodata:

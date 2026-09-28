@@ -1,0 +1,108 @@
+name: Release
+
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Version tag to create and release, e.g. v0.1.0 (must match Cargo.toml)
+        required: true
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  CARGO_TERM_COLOR: always
+  TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  binaries:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-latest
+            arch: amd64
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+            arch: arm64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.96.0"
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Install the musl toolchain
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends musl-tools
+          t=$(echo "${{ matrix.target }}" | tr - _)
+          echo "CC_$t=musl-gcc" >> "$GITHUB_ENV"
+          echo "AR_$t=ar" >> "$GITHUB_ENV"
+      - name: Check the tag matches the version
+        run: |
+          echo "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+' || { echo "$TAG is not a version tag"; exit 1; }
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name=="skein-server") | .version')
+          test "v$version" = "$TAG" || { echo "tag $TAG != v$version"; exit 1; }
+      - run: cargo build --release --locked --target ${{ matrix.target }} -p skein-server
+      - name: Check the binary is static and runs
+        run: |
+          bin=target/${{ matrix.target }}/release/skein
+          file "$bin" | grep -Eq "statically linked|static-pie linked"
+          "$bin" --version
+      - name: Package
+        run: |
+          mkdir -p dist/${{ matrix.arch }}
+          cp target/${{ matrix.target }}/release/skein dist/${{ matrix.arch }}/skein
+          tar -C dist/${{ matrix.arch }} -czf "skein-$TAG-${{ matrix.target }}.tar.gz" skein
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            skein-*.tar.gz
+            dist
+
+  publish:
+    needs: binaries
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Checksums
+        run: cd artifacts && sha256sum skein-*.tar.gz > SHA256SUMS && cat SHA256SUMS
+      # The image carries the binaries built above, not a second compile.
+      - name: Stage the binaries for the image
+        run: mv artifacts/dist dist && chmod +x dist/*/skein
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Image
+        run: |
+          image=ghcr.io/$(echo "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')
+          tags="--tag $image:${TAG#v}"
+          case "$TAG" in *-*) ;; *) tags="$tags --tag $image:latest" ;; esac
+          docker buildx build --target release --platform linux/amd64,linux/arm64 \
+            --label org.opencontainers.image.source="https://github.com/$GITHUB_REPOSITORY" \
+            --label org.opencontainers.image.licenses="FSL-1.1-ALv2" \
+            $tags --push .
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$TAG" artifacts/skein-*.tar.gz artifacts/SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --generate-notes \
+            $(case "$TAG" in *-*) echo --prerelease ;; esac)

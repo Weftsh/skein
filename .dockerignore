@@ -1,0 +1,5 @@
+target
+.testkit
+.git
+**/node_modules
+compose.yml

@@ -6,6 +6,39 @@ bucket: package bytes are content-addressed, every write is checked
 against its digest, and nothing is held in a process that another one
 needs.
 
+## Running it
+
+With Docker Compose — Skein, PostgreSQL and MinIO on one machine:
+
+```sh
+docker compose up -d --build --wait
+docker compose exec skein skein admin bootstrap --org acme
+```
+
+Open `http://localhost:8080` and sign in as `admin` with the password
+the bootstrap printed. Change the passwords in `compose.yml` first, and
+for anything beyond a trial put TLS in front of port 8080 and set
+`SKEIN_PUBLIC_URL`.
+
+Or run the image on its own against a PostgreSQL and a bucket you
+already have:
+
+```sh
+docker run -d -p 8080:8080 \
+  -e SKEIN_DB_URL=postgres://… -e SKEIN_STORE_URL=https://… \
+  -e AWS_ACCESS_KEY_ID=… -e AWS_SECRET_ACCESS_KEY=… -e AWS_REGION=… \
+  -e SKEIN_PUBLIC_URL=https://skein.example.com \
+  ghcr.io/weftsh/skein
+```
+
+Or the static binary from a release: `skein` serves, and `skein admin …`
+sets up and repairs. Releases carry Linux binaries for x86_64 and
+arm64 and a multi-architecture image, `ghcr.io/weftsh/skein:<version>`.
+
+`scripts/smoke.sh` builds the image, brings the Compose stack up,
+bootstraps it, and publishes and installs through it with the real npm
+— CI runs it on every push.
+
 ## Configuration
 
 Everything is the environment.
