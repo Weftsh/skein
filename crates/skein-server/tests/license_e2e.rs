@@ -53,7 +53,7 @@ struct FakeWeft {
 impl FakeWeft {
     fn start() -> FakeWeft {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let url = format!("http://{}/v1/check", listener.local_addr().unwrap());
+        let url = format!("http://{}/v1/skein/check", listener.local_addr().unwrap());
         let seen = Arc::new(Mutex::new(Vec::new()));
         let answer = Arc::new(Mutex::new((200, r#"{"status":"active"}"#.to_string())));
         let (log, reply) = (seen.clone(), answer.clone());
@@ -328,7 +328,7 @@ fn the_check_sends_three_fields_and_the_peak_seats() {
     let seen = weft.requests();
     assert_eq!(seen.len(), 1);
     assert!(
-        seen[0].request_line.starts_with("POST /v1/check "),
+        seen[0].request_line.starts_with("POST /v1/skein/check "),
         "{:?}",
         seen[0]
     );
@@ -603,7 +603,10 @@ fn a_configuration_mistake_refuses_to_start_and_a_bad_key_does_not() {
 
     let (code, err) = run_briefly(
         &["serve"],
-        &[("SKEIN_LICENSE_ENDPOINT", "http://license.example/v1/check")],
+        &[(
+            "SKEIN_LICENSE_ENDPOINT",
+            "http://license.example/v1/skein/check",
+        )],
         &db_url,
     )
     .expect("started with a plain-HTTP licence endpoint");

@@ -1,8 +1,8 @@
 # Licensing
 
 A Skein install needs a licence key from Weft to receive releases and
-security patches. The model is Weft Sandboxes', with the same keys and the
-same rules. This page covers the commercial licence key; the source code
+security patches. The model is Weft Sandboxes', with the same key format
+and the same rules; Skein's keys are signed with a key of Skein's own. This page covers the commercial licence key; the source code
 licence (FSL-1.1-ALv2) is in [LICENSE.md](../LICENSE.md).
 
 ## A licence never stops Skein
@@ -62,7 +62,7 @@ rather than read as one.
 ## What leaves your install
 
 **Online keys** — most installs — send one request a day to
-`https://license.weft.sh/v1/check`. It carries exactly three fields, and
+`https://license.weft.sh/v1/skein/check`. It carries exactly three fields, and
 the test suite fails if a fourth appears:
 
 | Field | Example |

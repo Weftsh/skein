@@ -1,10 +1,12 @@
 //! Skein's commercial licence.
 //!
 //! The same model as Weft Sandboxes (sandy's `packages/license`), and the
-//! same keys: `weft_lic_v1.<payload>.<signature>`, Ed25519, verified
-//! locally against public keys compiled into the release, issued by the
-//! same `weft-license` tool. A Skein key says `"product": "skein"`, so a
-//! key issued for another Weft product cannot pass as one.
+//! same key format: `weft_lic_v1.<payload>.<signature>`, Ed25519, verified
+//! locally against public keys compiled into the release, issued by
+//! Weft's license service (weftsh/license) — which signs Skein's keys
+//! with Skein's own KMS key, under Skein's own `kid`. A Skein key also
+//! says `"product": "skein"`, so a key issued for another Weft product
+//! cannot pass as one on either count.
 //!
 //! **A licence never stops Skein.** A missing, invalid, expired or
 //! over-cap licence produces warnings — in the UI, the API and the log —

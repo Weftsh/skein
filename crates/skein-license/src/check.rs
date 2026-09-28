@@ -19,7 +19,13 @@ use serde_json::Value;
 /// so a field added to [`CheckRequest`] and not here is not sent.
 pub const CHECK_FIELDS: [&str; 3] = ["keyId", "version", "peakSeats"];
 
-pub const DEFAULT_ENDPOINT: &str = "https://license.weft.sh/v1/check";
+/// Skein's own route on Weft's license service (weftsh/license): each
+/// product's check has its own route and its own field list, and
+/// `/v1/check` is Sandy's — it takes exactly Sandy's four fields and
+/// refuses these three with a 400. The service's `skein_e2e` reads this
+/// constant from the pinned Skein checkout and fails if it names a route
+/// the service does not serve for Skein.
+pub const DEFAULT_ENDPOINT: &str = "https://license.weft.sh/v1/skein/check";
 
 const MAX_NOTICE_CHARS: usize = 500;
 const MAX_RESPONSE_BYTES: u64 = 64 * 1024;
@@ -263,7 +269,7 @@ mod tests {
     /// next of `answers` (status, body), then 500s.
     fn endpoint(answers: Vec<(u16, &'static str)>) -> (String, Arc<Mutex<Vec<Seen>>>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let url = format!("http://{}/v1/check", listener.local_addr().unwrap());
+        let url = format!("http://{}/v1/skein/check", listener.local_addr().unwrap());
         let seen = Arc::new(Mutex::new(Vec::new()));
         let log = seen.clone();
         std::thread::spawn(move || {
@@ -333,7 +339,7 @@ mod tests {
         let seen = seen.lock().unwrap();
         assert_eq!(seen.len(), 1);
         assert!(
-            seen[0].head[0].starts_with("POST /v1/check "),
+            seen[0].head[0].starts_with("POST /v1/skein/check "),
             "{:?}",
             seen[0].head
         );

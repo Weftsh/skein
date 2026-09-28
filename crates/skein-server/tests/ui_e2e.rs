@@ -69,7 +69,7 @@ fn the_ui_walks_clean_in_a_real_browser() {
     // A licence endpoint that is not there: "Check now" must record the
     // failure and show it, not throw.
     let closed = TcpListener::bind("127.0.0.1:0").unwrap();
-    let nowhere = format!("http://{}/v1/check", closed.local_addr().unwrap());
+    let nowhere = format!("http://{}/v1/skein/check", closed.local_addr().unwrap());
     drop(closed);
     let bucket = Minio::shared().bucket("ui-walk");
     let server = Server::builder(env!("CARGO_BIN_EXE_skein"), &bucket.base_url)

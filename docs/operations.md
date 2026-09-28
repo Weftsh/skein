@@ -81,7 +81,7 @@ Everything is the environment.
 | `SKEIN_GC_GRACE_SECS` | `3600` | How long bytes nothing references must also have gone unused before they are collected. It runs from the last use — stored, stored again, pushed, mounted, or answered for to a `HEAD` — not from when a package or tag was deleted. A publish writes its bytes before its row, and a `docker push` asks about its layers before it sends the manifest, so this must comfortably exceed the longest publish or push. |
 | `SKEIN_DB_LOCK_TIMEOUT_MS` | `5000` | How long a write waits on another's lock before failing rather than hanging a request. |
 | `SKEIN_LICENSE_KEY` | *(none)* | Your Skein licence key. Applied on start when it differs from the one last applied, so a key installed from the UI stands until this changes. See [licensing.md](licensing.md). |
-| `SKEIN_LICENSE_ENDPOINT` | `https://license.weft.sh/v1/check` | Where an online licence's daily check goes. Must be HTTPS. |
+| `SKEIN_LICENSE_ENDPOINT` | `https://license.weft.sh/v1/skein/check` | Where an online licence's daily check goes. Must be HTTPS. |
 | `SKEIN_CA_FILE` | *(none)* | A PEM file of your own CA certificates, trusted for every TLS connection Skein makes — the database, the bucket, an npm mirror, the licence endpoint. See [TLS and your own CA](#tls-and-your-own-ca). A file that is missing or holds no certificate refuses to start. |
 | `SSL_CERT_FILE`, `SSL_CERT_DIR` | the OS's | Where the operating system's trust store is read from, as OpenSSL reads them. |
 | `AWS_DEFAULT_REGION` | — | Read when `AWS_REGION` is not set. |

@@ -1,9 +1,11 @@
 //! Ed25519 public keys trusted to sign Weft licences, by `kid`.
 //!
 //! Compiled into every release. The matching private keys live only in
-//! AWS KMS in Weft's billing account and never leave it — the same keys
-//! Weft Sandboxes trusts (sandy's `packages/license/src/trusted-keys.ts`),
-//! because the keys are the same keys.
+//! AWS KMS in Weft's billing account and never leave it. They are
+//! Skein's own: Weft's license service (weftsh/license) signs each
+//! product's keys with that product's KMS key under its own `kid`, so a
+//! key signed for Weft Sandboxes names a `kid` this list does not have and
+//! never verifies here, whatever its payload says.
 //!
 //! Adding or rotating a key: create an `ECC_NIST_EDWARDS25519` KMS key,
 //! export its public key (`aws kms get-public-key`), add it here under a
