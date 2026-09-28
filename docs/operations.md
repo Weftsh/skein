@@ -69,7 +69,7 @@ Everything is the environment.
 | `SKEIN_UPSTREAM_NPM` | `https://registry.npmjs.org` | The upstream the npm pull-through proxy reads from, when npm is in `proxy` mode. |
 | `SKEIN_UPSTREAM_ALLOW_PRIVATE` | `false` | Admit an upstream inside a private network — an internal mirror. It must still be HTTPS unless it is on loopback. |
 | `SKEIN_GC_INTERVAL_SECS` | `3600` | How often unreferenced package bytes are collected. `0` switches the collector off. |
-| `SKEIN_GC_GRACE_SECS` | `3600` | How long bytes must have been unreferenced before they are collected. A publish writes its bytes before its row, so this must comfortably exceed the longest publish. |
+| `SKEIN_GC_GRACE_SECS` | `3600` | How long bytes nothing references must also have gone unused before they are collected. It runs from the last use — stored, stored again, pushed, mounted, or answered for to a `HEAD` — not from when a package or tag was deleted. A publish writes its bytes before its row, and a `docker push` asks about its layers before it sends the manifest, so this must comfortably exceed the longest publish or push. |
 | `SKEIN_DB_LOCK_TIMEOUT_MS` | `5000` | How long a write waits on another's lock before failing rather than hanging a request. |
 | `SKEIN_LICENSE_KEY` | *(none)* | Your Skein licence key. Applied on start when it differs from the one last applied, so a key installed from the UI stands until this changes. See [licensing.md](licensing.md). |
 | `SKEIN_LICENSE_ENDPOINT` | `https://license.weft.sh/v1/check` | Where an online licence's daily check goes. Must be HTTPS. |
@@ -291,6 +291,13 @@ taken before the upgrade.
 ## Collecting unreferenced bytes
 
 Deleting a package removes its rows at once; its bytes are collected
-later, once nothing references them and they have been unreferenced for
-`SKEIN_GC_GRACE_SECS`. `skein admin gc --grace-secs N` runs one pass now
-and prints what it collected.
+later, once nothing references them and nobody has used them for
+`SKEIN_GC_GRACE_SECS`. Using them means storing them — the same bytes
+published again under another name count — or, for a container layer,
+being answered for to a `HEAD`, mounted into another repository, or
+named by a manifest being pushed: each of those is a push building on
+bytes it will not send, and the grace is what keeps them there until
+its manifest arrives. The clock starts at the last use, not at the
+delete, so bytes stored long ago and deleted now may go at the next
+pass. `skein admin gc --grace-secs N` runs one pass now and prints what
+it collected.

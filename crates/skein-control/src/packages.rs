@@ -43,6 +43,12 @@
 //! with one query ([`unreferenced_blobs`]); a refcount that drifts is a
 //! silently deleted layer, and the drift is invisible until a pull
 //! fails.
+//!
+//! What a blob does carry is when it was last **used** (`touched_at`):
+//! stored, stored again, or answered for to a client that will build on
+//! it without sending it. Content addressing is what makes that
+//! necessary — the bytes a publish is relying on may be bytes somebody
+//! else stored long ago — and the collector's grace is measured from it.
 
 use crate::db::{is_unique_violation, ControlDb};
 use crate::ids::ulid;
@@ -1095,8 +1101,19 @@ pub fn remove_tag(db: &ControlDb, package_id: &str, tag: &str) -> Result<bool, S
 
 // --------------------------------------------------------------- blobs
 
-/// Record that these bytes are in the store under this org's prefix.
-/// Idempotent: the same digest twice is one row and one object.
+/// Record that these bytes are in the store under this org's prefix,
+/// and that they were used at `now`.
+///
+/// Idempotent: the same digest twice is one row and one object. But
+/// storing a digest that is already here is a **use** of it — a publish
+/// deduping against bytes a deleted package or an untagged image left
+/// behind — so it moves `touched_at`. It used to be `DO NOTHING`, which
+/// left the grace running from the first storage: bytes first stored a
+/// week ago were collectable the instant they were stored again, in the
+/// gap before the row that names them, and the version went live with
+/// nothing behind it.
+///
+/// `GREATEST`, so a node whose clock is behind cannot move it back.
 pub fn note_blob(
     db: &ControlDb,
     org_id: &str,
@@ -1107,17 +1124,18 @@ pub fn note_blob(
     let digest = normalize_digest(digest)?;
     db.lock()
         .execute(
-            "INSERT INTO package_blobs (org_id, digest, size_bytes, created_at) \
-             VALUES ($1, $2, $3, $4) ON CONFLICT (org_id, digest) DO NOTHING",
+            "INSERT INTO package_blobs (org_id, digest, size_bytes, created_at, touched_at) \
+             VALUES ($1, $2, $3, $4, $4) ON CONFLICT (org_id, digest) DO UPDATE \
+             SET touched_at = GREATEST(package_blobs.touched_at, EXCLUDED.touched_at)",
             &[&org_id, &digest, &size_bytes, &now],
         )
         .map(|_| ())
         .map_err(|e| format!("note blob: {e}"))
 }
 
-/// Whether this org already holds these bytes — the question every
-/// upload asks first, and what makes a re-push of an unchanged layer
-/// free.
+/// Whether this org holds these bytes, and how many there are — without
+/// marking them used. What a download asks: handing somebody bytes
+/// promises nothing about keeping them.
 pub fn blob_exists(db: &ControlDb, org_id: &str, digest: &str) -> Result<Option<i64>, String> {
     let digest = normalize_digest(digest)?;
     Ok(db
@@ -1130,14 +1148,50 @@ pub fn blob_exists(db: &ControlDb, org_id: &str, digest: &str) -> Result<Option<
         .map(|r| r.get("size_bytes")))
 }
 
-/// Blobs of this org that no version's file names, older than `before`.
+/// Whether this org holds these bytes, **and** mark them used at `now`
+/// — one statement, one row.
+///
+/// What every answer asks that lets a client build on bytes it will not
+/// send: a `HEAD` answered 200 (after which `docker push` skips the
+/// layer), a cross-repository mount, a manifest's check of the blobs it
+/// names. Each of those is a promise that the bytes will still be here
+/// when the manifest arrives, and the promise is kept by the collector's
+/// grace — which is measured from this.
+///
+/// Without it a layer an untagged image left behind a week ago was
+/// collectable at the very moment a push had been told it was here:
+/// a sweep between the HEAD and the manifest took it, and the push
+/// failed, or was accepted naming a layer that was gone.
+pub fn touch_blob(
+    db: &ControlDb,
+    org_id: &str,
+    digest: &str,
+    now: i64,
+) -> Result<Option<i64>, String> {
+    let digest = normalize_digest(digest)?;
+    Ok(db
+        .lock()
+        .query_opt(
+            "UPDATE package_blobs SET touched_at = GREATEST(touched_at, $3) \
+             WHERE org_id = $1 AND digest = $2 RETURNING size_bytes",
+            &[&org_id, &digest, &now],
+        )
+        .map_err(|e| format!("touch blob: {e}"))?
+        .map(|r| r.get("size_bytes")))
+}
+
+/// Blobs of this org that no version's file names and nobody has used
+/// since `before`.
 ///
 /// The collector's mark phase. The age floor is not politeness: an
-/// upload writes its object and *then* its `package_files` row, so a
-/// blob uploaded seconds ago and not yet referenced is a publish in
-/// flight, not garbage. The caller re-reads this immediately before
-/// deleting each key, which is what stops a publish that landed during
-/// the sweep from losing a layer it just deduped against.
+/// upload writes its object and *then* its `package_files` row, and a
+/// push is told a layer is here and *then* sends the manifest naming
+/// it — so a blob used seconds ago and not yet referenced is a publish
+/// in flight, not garbage. The age is `touched_at`, the last use, and
+/// not `created_at`, the first storage: content addressing means the
+/// bytes a publish is relying on may have been stored long ago. The
+/// caller asks [`collectable`] again immediately before deleting each
+/// key, because this listing is a snapshot.
 pub fn unreferenced_blobs(
     db: &ControlDb,
     org_id: &str,
@@ -1148,13 +1202,13 @@ pub fn unreferenced_blobs(
         .lock()
         .query(
             "SELECT b.digest, b.size_bytes FROM package_blobs b \
-             WHERE b.org_id = $1 AND b.created_at < $2 \
+             WHERE b.org_id = $1 AND b.touched_at < $2 \
                AND NOT EXISTS ( \
                    SELECT 1 FROM package_files f \
                    JOIN package_versions v ON v.id = f.version_id \
                    JOIN packages p ON p.id = v.package_id \
                    WHERE p.org_id = $1 AND f.digest = b.digest) \
-             ORDER BY b.created_at LIMIT $3",
+             ORDER BY b.touched_at LIMIT $3",
             &[&org_id, &before, &limit.clamp(1, 1000)],
         )
         .map_err(|e| format!("unreferenced blobs: {e}"))?
@@ -1163,22 +1217,36 @@ pub fn unreferenced_blobs(
         .collect())
 }
 
-/// Whether this digest is referenced right now. Asked again immediately
-/// before the delete, so a publish that landed during the sweep keeps
-/// its bytes.
-pub fn blob_referenced(db: &ControlDb, org_id: &str, digest: &str) -> Result<bool, String> {
+/// Whether the collector may still take this blob: nothing references
+/// it **and** nobody has used it since `before`.
+///
+/// Asked again immediately before the delete, because the listing is a
+/// snapshot and both halves can change under it — a publish can name
+/// the digest, and a client can be told it is here and start building
+/// on it. Re-reading only the reference, as this once did, lost the
+/// second: the HEAD a `docker push` made a moment ago counted for
+/// nothing.
+pub fn collectable(
+    db: &ControlDb,
+    org_id: &str,
+    digest: &str,
+    before: i64,
+) -> Result<bool, String> {
     let digest = normalize_digest(digest)?;
     db.lock()
         .query_one(
             "SELECT EXISTS ( \
-                 SELECT 1 FROM package_files f \
-                 JOIN package_versions v ON v.id = f.version_id \
-                 JOIN packages p ON p.id = v.package_id \
-                 WHERE p.org_id = $1 AND f.digest = $2)",
-            &[&org_id, &digest],
+                 SELECT 1 FROM package_blobs b \
+                 WHERE b.org_id = $1 AND b.digest = $2 AND b.touched_at < $3 \
+                   AND NOT EXISTS ( \
+                       SELECT 1 FROM package_files f \
+                       JOIN package_versions v ON v.id = f.version_id \
+                       JOIN packages p ON p.id = v.package_id \
+                       WHERE p.org_id = $1 AND f.digest = $2))",
+            &[&org_id, &digest, &before],
         )
         .map(|r| r.get(0))
-        .map_err(|e| format!("blob referenced: {e}"))
+        .map_err(|e| format!("collectable: {e}"))
 }
 
 pub fn forget_blob(db: &ControlDb, org_id: &str, digest: &str) -> Result<(), String> {
@@ -1208,6 +1276,9 @@ pub struct Block {
 /// is never visible with a partial block list — a reader that met one
 /// would serve a truncated layer and the digest would not tell it
 /// apart, because the digest names the whole blob and not the list.
+///
+/// An upload that finishes on a digest already stored is a use of it,
+/// exactly as in [`note_blob`], and moves `touched_at` the same way.
 pub fn note_blocked_blob(
     db: &ControlDb,
     org_id: &str,
@@ -1220,8 +1291,9 @@ pub fn note_blocked_blob(
     db.lock()
         .transaction(|tx| {
             tx.execute(
-                "INSERT INTO package_blobs (org_id, digest, size_bytes, created_at) \
-                 VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING",
+                "INSERT INTO package_blobs (org_id, digest, size_bytes, created_at, touched_at) \
+                 VALUES ($1, $2, $3, $4, $4) ON CONFLICT (org_id, digest) DO UPDATE \
+                 SET touched_at = GREATEST(package_blobs.touched_at, EXCLUDED.touched_at)",
                 &[&org_id, &digest, &total, &now],
             )?;
             // Replace rather than append: a second upload of identical
@@ -1291,23 +1363,37 @@ pub fn forget_blocks(db: &ControlDb, org_id: &str, digest: &str) -> Result<(), S
 /// session wrote may be *exactly* the block a finished blob deduped
 /// against: content-addressing means two pushes of the same layer write
 /// the same key.
-pub fn block_referenced(db: &ControlDb, org_id: &str, block: &str) -> Result<bool, String> {
+pub fn block_referenced(
+    db: &ControlDb,
+    org_id: &str,
+    block: &str,
+    except_upload: &str,
+) -> Result<bool, String> {
     db.lock()
         .query_one(
-            "SELECT EXISTS (SELECT 1 FROM package_blocks WHERE org_id = $1 AND block = $2)",
-            &[&org_id, &block],
+            "SELECT EXISTS (SELECT 1 FROM package_blocks WHERE org_id = $1 AND block = $2) \
+                 OR EXISTS (SELECT 1 FROM package_uploads WHERE org_id = $1 AND id <> $3 \
+                     AND blocks::jsonb @> jsonb_build_array(jsonb_build_object('block', $2::text)))",
+            &[&org_id, &block, &except_upload],
         )
         .map(|r| r.get(0))
         .map_err(|e| format!("block referenced: {e}"))
 }
 
-/// Whether any *other* blob still references this block.
+/// Whether any *other* blob — or any upload still in flight — uses this
+/// block.
 ///
 /// Blocks dedupe across blobs: two images sharing a base layer share
 /// its blocks. Deleting a blob must not take a block a neighbour is
 /// still using, so the collector asks this immediately before deleting
 /// — the same re-read-before-delete shape the epoch collector uses, and
 /// for the same reason.
+///
+/// An upload session's blocks live only in its own row until it
+/// finishes, and this used to look at `package_blocks` alone. So a large
+/// layer re-pushed while its old, unreferenced blob was being collected
+/// had its freshly written blocks deleted under it — same bytes, same
+/// block keys — and the push finished into an image nobody could pull.
 pub fn block_referenced_elsewhere(
     db: &ControlDb,
     org_id: &str,
@@ -1317,7 +1403,9 @@ pub fn block_referenced_elsewhere(
     db.lock()
         .query_one(
             "SELECT EXISTS (SELECT 1 FROM package_blocks \
-             WHERE org_id = $1 AND block = $2 AND digest <> $3)",
+                 WHERE org_id = $1 AND block = $2 AND digest <> $3) \
+                 OR EXISTS (SELECT 1 FROM package_uploads WHERE org_id = $1 \
+                     AND blocks::jsonb @> jsonb_build_array(jsonb_build_object('block', $2::text)))",
             &[&org_id, &block, &except_digest],
         )
         .map(|r| r.get(0))
@@ -2711,14 +2799,122 @@ mod tests {
         let digests: Vec<&str> = found.iter().map(|(d, _)| d.as_str()).collect();
         assert_eq!(digests, vec![orphan.as_str()], "found {found:?}");
 
-        assert!(blob_referenced(&db, &org, &used.digest).unwrap());
-        assert!(!blob_referenced(&db, &org, &orphan).unwrap());
+        // Referenced is never collectable, however old; unreferenced and
+        // idle is; unreferenced and used a moment ago is not yet.
+        assert!(!collectable(&db, &org, &used.digest, i64::MAX).unwrap());
+        assert!(collectable(&db, &org, &orphan, 1_000).unwrap());
+        assert!(!collectable(&db, &org, &in_flight, 1_000).unwrap());
+        // …and a digest nobody stored is not "collectable" either.
+        assert!(!collectable(&db, &org, &"9".repeat(64), i64::MAX).unwrap());
 
         forget_blob(&db, &org, &orphan).unwrap();
         assert!(unreferenced_blobs(&db, &org, 1_000, 100)
             .unwrap()
             .is_empty());
         assert_eq!(bytes_for_org(&db, &org).unwrap(), 10 + 99);
+    }
+
+    /// Storing bytes the store already holds restarts their grace.
+    ///
+    /// Content addressing means a publish can land on a digest that is
+    /// already here: a tarball a deleted package left behind, a layer an
+    /// untagged image left behind. The grace used to run from when the
+    /// digest was *first* stored, and storing it again changed nothing,
+    /// so a blob first stored a week ago was collectable at the very
+    /// moment a publish had just written it again and not yet written
+    /// the row that names it — and the version went live with nothing
+    /// behind it. Both shapes of blob, because both are written through
+    /// their own statement.
+    #[test]
+    fn storing_a_blob_again_restarts_its_grace() {
+        let (db, org) = world("pkg-gc-again");
+        let single = "e".repeat(64);
+        let blocked = "f".repeat(64);
+        let blocks = [
+            Block {
+                block: "1".repeat(64),
+                size_bytes: 16,
+            },
+            Block {
+                block: "2".repeat(64),
+                size_bytes: 3,
+            },
+        ];
+        note_blob(&db, &org, &single, 7, 10).unwrap();
+        note_blocked_blob(&db, &org, &blocked, &blocks, 10).unwrap();
+        let listed = |before: i64| {
+            let mut d: Vec<String> = unreferenced_blobs(&db, &org, before, 100)
+                .unwrap()
+                .into_iter()
+                .map(|(d, _)| d)
+                .collect();
+            d.sort();
+            d
+        };
+        assert_eq!(listed(1_000), vec![single.clone(), blocked.clone()]);
+
+        // Stored again at 5 000 — a publish deduping against them.
+        note_blob(&db, &org, &single, 7, 5_000).unwrap();
+        note_blocked_blob(&db, &org, &blocked, &blocks, 5_000).unwrap();
+        assert!(
+            listed(1_000).is_empty(),
+            "bytes stored again a moment ago were collectable by their first storage: {:?}",
+            listed(1_000)
+        );
+        // And once the grace has run from the last use, they go.
+        assert_eq!(listed(6_000), vec![single.clone(), blocked.clone()]);
+        // Stored twice is still one blob, billed once.
+        assert_eq!(bytes_for_org(&db, &org).unwrap(), 7 + 19);
+    }
+
+    /// Telling a client a blob is here restarts its grace, and nothing
+    /// else about the blob changes.
+    ///
+    /// A HEAD answered 200, a mount, a manifest's check of what it names:
+    /// each is a promise the bytes will still be here when the manifest
+    /// arrives. The collector — its listing and its re-check both — has
+    /// to see that promise, or a layer an untagged image left behind a
+    /// week ago is taken between the answer and the manifest.
+    #[test]
+    fn telling_a_client_a_blob_is_here_restarts_its_grace() {
+        let (db, org) = world("pkg-gc-touch");
+        let digest = "7a".repeat(32);
+        note_blob(&db, &org, &digest, 42, 10).unwrap();
+        let listed = |before: i64| unreferenced_blobs(&db, &org, before, 100).unwrap();
+        assert_eq!(listed(1_000), vec![(digest.clone(), 42)]);
+        assert!(collectable(&db, &org, &digest, 1_000).unwrap());
+
+        // A download is not a promise and changes nothing.
+        assert_eq!(blob_exists(&db, &org, &digest).unwrap(), Some(42));
+        assert_eq!(listed(1_000).len(), 1);
+
+        // Asked about at 5 000, in the wire's spelling: it answers the
+        // size, and the grace now runs from 5 000.
+        let wire = format!("sha256:{}", digest.to_uppercase());
+        assert_eq!(touch_blob(&db, &org, &wire, 5_000).unwrap(), Some(42));
+        assert!(listed(1_000).is_empty(), "{:?}", listed(1_000));
+        assert!(
+            !collectable(&db, &org, &digest, 1_000).unwrap(),
+            "the re-check before the delete did not see the answer a client was given"
+        );
+
+        // A node whose clock is behind cannot move it back.
+        assert_eq!(touch_blob(&db, &org, &digest, 3_000).unwrap(), Some(42));
+        assert!(listed(4_000).is_empty());
+
+        // Once the grace has run from the last answer, it goes.
+        assert_eq!(listed(6_000), vec![(digest.clone(), 42)]);
+        assert!(collectable(&db, &org, &digest, 6_000).unwrap());
+
+        // Bytes nobody stored are not conjured by being asked about, and
+        // another organization's question touches nothing here.
+        assert_eq!(touch_blob(&db, &org, &"8".repeat(64), 9_000).unwrap(), None);
+        assert!(blob_exists(&db, &org, &"8".repeat(64)).unwrap().is_none());
+        let other = crate::ids::ulid();
+        assert_eq!(touch_blob(&db, &other, &digest, 9_000).unwrap(), None);
+        assert_eq!(listed(6_000), vec![(digest.clone(), 42)]);
+        assert_eq!(bytes_for_org(&db, &org).unwrap(), 42);
+        assert!(touch_blob(&db, &org, "not a digest", 9_000).is_err());
     }
 
     /// Deleting the package takes its versions, files and tags with it —
@@ -2751,7 +2947,7 @@ mod tests {
             10,
             "the bytes went with the row instead of waiting for the sweep"
         );
-        assert!(!blob_referenced(&db, &org, &f.digest).unwrap());
+        assert!(collectable(&db, &org, &f.digest, 1_000).unwrap());
         assert!(!remove(&db, &org, &p.id).unwrap());
     }
 

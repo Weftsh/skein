@@ -168,7 +168,14 @@ through from Docker Hub or any other registry.
 ## Collecting unused layers
 
 Deleting a repository, or a tag, leaves layers nothing references; they
-are collected once they have been unreferenced for
-`SKEIN_GC_GRACE_SECS`. A layer two images share stays as long as either
+are collected once nobody has used them for `SKEIN_GC_GRACE_SECS`. A
+push uses a layer when it uploads it, and also when it only asks about
+it: `docker push` sends `HEAD` for every layer and skips the ones
+Skein already holds, a multi-platform push checks its platform
+manifests the same way, and a mount borrows a layer from another
+repository. Each of those answers restarts the layer's grace, so a push
+building on a layer an untagged image left behind long ago does not
+lose it before its manifest arrives. The clock runs from the last use,
+not from the delete. A layer two images share stays as long as either
 does. An upload that was started and never finished — an interrupted
 `docker push` — is collected once nobody has written to it for a day.
