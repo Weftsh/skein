@@ -299,11 +299,16 @@ fn an_ecosystem_that_is_off_answers_for_nothing() {
     let bucket = Minio::shared().bucket("npm-e2e");
     let server = spawn(&bucket.base_url, "npm-off");
     let admin = server.bootstrap("acme");
-    let off = serde_json::json!({ "ecosystem": "npm", "mode": "off" });
-    assert_eq!(
-        server.req("PUT", "/api/v1/ecosystems", &admin, Some(off)).0,
-        200
-    );
+    // The bootstrap switches on every ecosystem this build serves, so
+    // switch them all off: this is a registry nobody switched anything
+    // on in, whichever doors the build has.
+    for eco in ["npm", "maven", "pypi", "cargo", "oci"] {
+        let off = serde_json::json!({ "ecosystem": eco, "mode": "off" });
+        assert_eq!(
+            server.req("PUT", "/api/v1/ecosystems", &admin, Some(off)).0,
+            200
+        );
+    }
 
     let (status, _) = server.get("/npm/widget", &admin);
     assert_eq!(status, 404);

@@ -6,6 +6,7 @@
 //!
 //! - `blobs` — bytes in the object store, content-addressed and verified.
 //! - `npm` — the npm registry protocol, translated to the control plane.
+//! - `maven` — Maven's repository layout and its one generated document.
 //! - `spdx`, `policy` — the admission policy: what may enter from an
 //!   upstream registry, decided per version.
 //! - `upstream` — fetching from a public registry, and the rules that
@@ -28,6 +29,7 @@
 //! would then have to write a plugin against.
 
 pub mod blobs;
+pub mod maven;
 pub mod npm;
 pub mod policy;
 pub mod spdx;

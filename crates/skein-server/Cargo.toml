@@ -14,6 +14,9 @@ path = "src/main.rs"
 skein-store.workspace = true
 skein-control.workspace = true
 axum = "0.7"
+# Only for `hyper::ext::ReasonPhrase`: Maven prints the status line of a
+# refusal and never its body, so the Maven door writes its sentence there.
+hyper = { version = "1", default-features = false, features = ["http1"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "time", "sync"] }
 bytes = "1"
 futures-util = { version = "0.3", default-features = false }

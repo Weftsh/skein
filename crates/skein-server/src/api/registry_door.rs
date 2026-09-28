@@ -8,8 +8,8 @@
 //! ## Why the error body is the caller's
 //!
 //! The *decision* is shared; the *rendering* is not. npm reads
-//! `{"error": …}`, Cargo reads `{"errors":[{"detail": …}]}`, Maven reads
-//! a status code and prints whatever body it gets, and PyPI's clients
+//! `{"error": …}`, Cargo reads `{"errors":[{"detail": …}]}`, Maven prints
+//! the status line and never the body, and PyPI's clients
 //! read the reason phrase. So each door passes in how to render a
 //! refusal — [`Refusal`] — and the shared code never invents a body.
 //!
