@@ -144,11 +144,10 @@ Where a declaration comes from, per ecosystem:
 | Ecosystem | Declared licence |
 |---|---|
 | npm | `license`, plus the legacy `{type: …}` and `licenses[]` spellings |
-| Containers | `org.opencontainers.image.licenses` — already SPDX, and almost never set |
 | PyPI | `info.license`, classifiers, PEP 639 `License-Expression` |
 | Cargo | `license` (already SPDX) or `license_file` |
 | Maven | the POM's `<licenses><license><name>` — free text, not SPDX |
-| OCI | `org.opencontainers.image.licenses` — usually absent |
+| Containers (OCI) | `org.opencontainers.image.licenses` — already SPDX, and usually absent |
 
 ## What a refusal looks like
 

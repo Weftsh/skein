@@ -108,6 +108,18 @@ jobs:
             --label org.opencontainers.image.source="https://github.com/$GITHUB_REPOSITORY" \
             --label org.opencontainers.image.licenses="FSL-1.1-ALv2" \
             $tags --push .
+      # An air-gapped install cannot pull: the same image as a file per
+      # architecture, `docker load -i` on the other side.
+      - name: Image tarballs
+        run: |
+          image=ghcr.io/$(echo "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')
+          for arch in amd64 arm64; do
+            docker buildx build --target release --platform "linux/$arch" \
+              --tag "$image:${TAG#v}" \
+              --output "type=docker,dest=artifacts/skein-image-$TAG-linux-$arch.tar" .
+            gzip "artifacts/skein-image-$TAG-linux-$arch.tar"
+          done
+          (cd artifacts && sha256sum skein-image-*.tar.gz >> SHA256SUMS && cat SHA256SUMS)
       - name: Create the release
         env:
           GH_TOKEN: ${{ github.token }}

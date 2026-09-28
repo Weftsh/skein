@@ -207,6 +207,35 @@ that reaches the internet only through a forward proxy cannot use npm's
 proxy mode, and its licence check does not complete — which becomes a
 warning after seven days and never a refusal.
 
+## Logs
+
+Skein writes plain lines to standard error, one event per line, each
+beginning `skein:` — start-up, the licence's warnings when they change,
+the collector's work, and failures. There is no access log; your proxy
+or load balancer keeps that. Lines carry no timestamp of their own: the
+container runtime or journald adds one (`docker logs -t`). Nothing
+secret is logged — no password, token or licence key.
+
+## Air-gapped installs
+
+Skein needs nothing from the internet to run: it starts, serves and
+collects with no route out. The npm proxy mode and an online licence
+key are the only features that reach outside, and both are off unless
+you configure them. Use an offline licence key.
+
+What you bring inside is the image or the static binary. Each release
+carries the image as a file per architecture,
+`skein-image-<version>-linux-<arch>.tar.gz`, beside the binaries and
+their checksums:
+
+```sh
+docker load -i skein-image-v0.1.0-linux-amd64.tar.gz
+```
+
+For the Compose file, bring the `postgres:16`, `nginx` and MinIO images
+too — mirror them into your own registry, or `docker save` and
+`docker load` them across.
+
 ## Setting up
 
 ```sh
