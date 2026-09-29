@@ -6,7 +6,7 @@
 //! question the package page answers. Changing anybody but yourself is
 //! `org:admin`.
 
-use crate::api::{audit, internal, json_error};
+use crate::api::{audit, internal, json_error, not_found};
 use crate::app::SharedState;
 use crate::authx::{self, Challenge};
 use crate::throttle::{Key, Lockout, Refusal};
@@ -49,7 +49,7 @@ fn token_json(t: &auth::TokenInfo) -> serde_json::Value {
 
 fn change_error(e: ChangeError) -> Response {
     match e {
-        ChangeError::NotFound => authx::not_found(),
+        ChangeError::NotFound => not_found("no such person"),
         ChangeError::LastAdmin => json_error(StatusCode::CONFLICT, e.to_string()),
         ChangeError::Other(e) => internal(e),
     }
@@ -464,12 +464,12 @@ pub async fn revoke_token(
     };
     let t = match auth::by_id(&state.db, &id) {
         Ok(Some(t)) if t.user_id == p.user_id || p.allows(Scope::OrgAdmin) => t,
-        Ok(_) => return authx::not_found(),
+        Ok(_) => return not_found("no such token"),
         Err(e) => return internal(e),
     };
     match auth::revoke(&state.db, &t.id) {
         Ok(true) => {}
-        Ok(false) => return authx::not_found(),
+        Ok(false) => return not_found("no such token"),
         Err(e) => return internal(e),
     }
     audit(
@@ -581,7 +581,7 @@ pub async fn update_user(
     };
     let target = match users::by_id(&state.db, &id) {
         Ok(Some(u)) => u,
-        Ok(None) => return authx::not_found(),
+        Ok(None) => return not_found("no such person"),
         Err(e) => return internal(e),
     };
     if let Some(r) = &body.role {
@@ -631,7 +631,7 @@ pub async fn update_user(
     audit(&state, &caller, "user.update", changed);
     match users::by_id(&state.db, &target.id) {
         Ok(Some(u)) => Json(user_json(&u)).into_response(),
-        Ok(None) => authx::not_found(),
+        Ok(None) => not_found("no such person"),
         Err(e) => internal(e),
     }
 }
@@ -649,7 +649,7 @@ pub async fn delete_user(
     };
     let target = match users::by_id(&state.db, &id) {
         Ok(Some(u)) => u,
-        Ok(None) => return authx::not_found(),
+        Ok(None) => return not_found("no such person"),
         Err(e) => return internal(e),
     };
     if let Err(e) = users::delete(&state.db, &target.id) {
@@ -698,7 +698,7 @@ pub async fn mint_for_user(
     };
     let owner = match users::by_id(&state.db, &id) {
         Ok(Some(u)) => u,
-        Ok(None) => return authx::not_found(),
+        Ok(None) => return not_found("no such person"),
         Err(e) => return internal(e),
     };
     if owner.disabled_at.is_some() {

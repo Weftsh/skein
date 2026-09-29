@@ -787,6 +787,198 @@ fn a_refusal_names_what_was_attempted() {
     assert!(server.healthy());
 }
 
+/// Every refusal the REST API gives is `{"error": <a sentence>}`, which
+/// is the one thing the UI shows. A missing package used to answer the
+/// registry doors' bare-text `not found`, and the UI, finding no
+/// `error` in it, showed the person `404 Not Found`. The class, not the
+/// one route: a missing thing of each kind, a request with no
+/// credential, a body that is not JSON, a method a route does not take
+/// and a route that does not exist — each a JSON sentence, and none of
+/// them a Basic challenge a browser would answer with a dialog.
+#[test]
+fn every_api_refusal_is_a_sentence_in_json() {
+    let bucket = Minio::shared().bucket("people-json-errors");
+    let server = spawn(&bucket.base_url, "people-json-errors");
+    let admin = server.bootstrap("acme");
+    let (_, reader) = server.person(&admin, "rita", "reader", &["org:read"]);
+    let (s, body) = server.req(
+        "PUT",
+        "/npm/@acme%2fwidget",
+        &admin,
+        Some(publish_doc("@acme/widget", "1.0.0", b"bytes")),
+    );
+    assert_eq!(s, 201, "{body}");
+    let (_, listed) = server.get("/api/v1/packages", &admin);
+    let id = listed["packages"][0]["id"].as_str().unwrap().to_string();
+    let nobody = "01nosuchthing0000000000000";
+    let bearer = format!("Bearer {admin}");
+    let as_admin: &[(&str, &str)] = &[
+        ("Authorization", bearer.as_str()),
+        ("Content-Type", "application/json"),
+    ];
+    let yank = br#"{"yanked": true}"#.as_slice();
+    /// Method, path, headers, body, the status, and the sentence — or
+    /// `""` where the words are the framework's and only their shape is
+    /// ours.
+    type Case<'a> = (
+        &'a str,
+        String,
+        &'a [(&'a str, &'a str)],
+        Option<&'a [u8]>,
+        u16,
+        &'a str,
+    );
+    let cases: Vec<Case> = vec![
+        (
+            "GET",
+            format!("/api/v1/packages/{nobody}"),
+            as_admin,
+            None,
+            404,
+            "no such package",
+        ),
+        (
+            "DELETE",
+            format!("/api/v1/packages/{nobody}"),
+            as_admin,
+            None,
+            404,
+            "no such package",
+        ),
+        (
+            "POST",
+            format!("/api/v1/packages/{nobody}/versions/1.0.0/yank"),
+            as_admin,
+            Some(yank),
+            404,
+            "no such package",
+        ),
+        (
+            "POST",
+            format!("/api/v1/packages/{id}/versions/9.9.9/yank"),
+            as_admin,
+            Some(yank),
+            404,
+            "no such version",
+        ),
+        (
+            "PATCH",
+            format!("/api/v1/users/{nobody}"),
+            as_admin,
+            Some(br#"{"role": "reader"}"#),
+            404,
+            "no such person",
+        ),
+        (
+            "DELETE",
+            format!("/api/v1/users/{nobody}"),
+            as_admin,
+            None,
+            404,
+            "no such person",
+        ),
+        (
+            "POST",
+            format!("/api/v1/users/{nobody}/tokens"),
+            as_admin,
+            Some(br#"{"label": "x", "scopes": ["package:read"]}"#),
+            404,
+            "no such person",
+        ),
+        (
+            "DELETE",
+            format!("/api/v1/tokens/{nobody}"),
+            as_admin,
+            None,
+            404,
+            "no such token",
+        ),
+        (
+            "DELETE",
+            "/api/v1/policy/namespaces?ecosystem=npm&pattern=@never".into(),
+            as_admin,
+            None,
+            404,
+            "no such reserved namespace",
+        ),
+        (
+            "DELETE",
+            "/api/v1/findings?ecosystem=npm&name=never&version=1.0.0".into(),
+            as_admin,
+            None,
+            404,
+            "no such finding",
+        ),
+        (
+            "GET",
+            "/api/v1/no-such-route".into(),
+            as_admin,
+            None,
+            404,
+            "no such API route",
+        ),
+        // No credential at all: a sentence, and no Basic challenge.
+        (
+            "GET",
+            "/api/v1/packages".into(),
+            &[],
+            None,
+            401,
+            "authentication required",
+        ),
+        // A body that is not JSON, and a method the route does not take:
+        // the framework's own refusals, which are not ours to word but
+        // are ours to wrap.
+        (
+            "POST",
+            "/api/v1/users".into(),
+            as_admin,
+            Some(b"{not json"),
+            400,
+            "",
+        ),
+        ("PATCH", "/api/v1/packages".into(), as_admin, None, 405, ""),
+    ];
+    for (method, path, headers, body, status, want) in cases {
+        let r = server.raw(method, &path, headers, body);
+        assert_eq!(r.status, status, "{method} {path}: {}", r.text());
+        assert!(
+            r.header("content-type")
+                .is_some_and(|c| c.starts_with("application/json")),
+            "{method} {path} answered {:?}: {}",
+            r.header("content-type"),
+            r.text()
+        );
+        let said = r.json()["error"].as_str().unwrap_or_default().to_string();
+        assert!(
+            !said.trim().is_empty(),
+            "{method} {path}: no sentence in {}",
+            r.text()
+        );
+        if !want.is_empty() {
+            assert_eq!(said, want, "{method} {path}");
+        }
+        assert!(
+            r.header("www-authenticate").is_none(),
+            "{method} {path}: the API challenged a browser"
+        );
+    }
+    // A registry door keeps its own dialect: a bare 404 to a client that
+    // authenticated, and a Basic challenge to one that did not.
+    let r = server.raw(
+        "GET",
+        "/v2/acme/nothing/tags/list",
+        &[("Authorization", &format!("Bearer {reader}"))],
+        None,
+    );
+    assert_eq!(r.status, 404, "{}", r.text());
+    let r = server.raw("GET", "/npm/@acme%2fwidget", &[], None);
+    assert_eq!(r.status, 401);
+    assert!(r.header("www-authenticate").is_some());
+    assert!(server.healthy());
+    assert_eq!(server.get("/api/v1/me", &reader).0, 200);
+}
+
 // ------------------------------------------------------ sign-in throttle
 
 /// `Retry-After` on a throttled sign-in, as seconds, checked to be a

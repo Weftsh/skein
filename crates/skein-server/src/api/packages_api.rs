@@ -11,7 +11,7 @@
 //! Reading the list is `org:read`, because somebody who is about to
 //! publish needs to know whether they can.
 
-use crate::api::{audit, internal, json_error};
+use crate::api::{audit, internal, json_error, not_found};
 use crate::app::SharedState;
 use crate::authx::{self, Challenge};
 use axum::extract::{Path, Query, State};
@@ -198,7 +198,7 @@ pub async fn show(
     }
     let pkg = match packages::by_id(&state.db, &org.id, &package_id) {
         Ok(Some(p)) => p,
-        Ok(None) => return authx::not_found(),
+        Ok(None) => return not_found("no such package"),
         Err(e) => return internal(e),
     };
     let versions = match packages::versions(&state.db, &pkg.id) {
@@ -283,17 +283,17 @@ pub async fn yank(
     };
     let pkg = match packages::by_id(&state.db, &org.id, &package_id) {
         Ok(Some(p)) => p,
-        Ok(None) => return authx::not_found(),
+        Ok(None) => return not_found("no such package"),
         Err(e) => return internal(e),
     };
     let v = match packages::version_by_number(&state.db, &pkg.id, &version) {
         Ok(Some(v)) => v,
-        Ok(None) => return authx::not_found(),
+        Ok(None) => return not_found("no such version"),
         Err(e) => return json_error(StatusCode::BAD_REQUEST, e),
     };
     match packages::yank(&state.db, &v.id, body.reason.as_deref(), body.yanked) {
         Ok(true) => {}
-        Ok(false) => return authx::not_found(),
+        Ok(false) => return not_found("no such version"),
         Err(e) => return internal(e),
     }
     audit(
@@ -312,7 +312,7 @@ pub async fn yank(
     );
     match packages::version_by_number(&state.db, &pkg.id, &version) {
         Ok(Some(v)) => Json(version_json(&v)).into_response(),
-        Ok(None) => authx::not_found(),
+        Ok(None) => not_found("no such version"),
         Err(e) => internal(e),
     }
 }
@@ -335,12 +335,12 @@ pub async fn remove(
     };
     let pkg = match packages::by_id(&state.db, &org.id, &package_id) {
         Ok(Some(p)) => p,
-        Ok(None) => return authx::not_found(),
+        Ok(None) => return not_found("no such package"),
         Err(e) => return internal(e),
     };
     match packages::remove(&state.db, &org.id, &package_id) {
         Ok(true) => {}
-        Ok(false) => return authx::not_found(),
+        Ok(false) => return not_found("no such package"),
         Err(e) => return internal(e),
     }
     // The blobs stay until the collector proves nothing else references
@@ -574,7 +574,7 @@ pub async fn release(
     let pattern = q.get("pattern").map(String::as_str).unwrap_or("");
     match packages::release_namespace(&state.db, &org.id, eco, pattern) {
         Ok(true) => {}
-        Ok(false) => return authx::not_found(),
+        Ok(false) => return not_found("no such reserved namespace"),
         Err(e) => return internal(e),
     }
     audit(
@@ -638,7 +638,7 @@ pub async fn forget_finding(
     let version = q.get("version").map(String::as_str).unwrap_or("*");
     match packages::forget_policy_event(&state.db, &org.id, eco, name, version) {
         Ok(true) => {}
-        Ok(false) => return authx::not_found(),
+        Ok(false) => return not_found("no such finding"),
         Err(e) => return internal(e),
     }
     audit(
