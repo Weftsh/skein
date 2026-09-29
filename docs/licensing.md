@@ -2,8 +2,13 @@
 
 A Skein install needs a licence key from Weft to receive releases and
 security patches. The model is Weft Sandboxes', with the same key format
-and the same rules; Skein's keys are signed with a key of Skein's own. This page covers the commercial licence key; the source code
-licence (FSL-1.1-ALv2) is in [LICENSE.md](../LICENSE.md).
+and the same rules; Skein's keys are signed with a key of Skein's own.
+This page covers the commercial licence key; the source code licence
+(FSL-1.1-ALv2) is in [LICENSE.md](../LICENSE.md).
+
+Keys come from Weft's license service by email, with how to install
+them: under **Settings → Licence**, or on the server with
+`skein admin license install < key.txt`.
 
 ## A licence never stops Skein
 
