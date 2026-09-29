@@ -194,7 +194,7 @@ pub(crate) const MIGRATIONS: &[&str] = &[
         size_bytes            BIGINT NOT NULL DEFAULT 0,
         -- Who published it, and with which credential. SET NULL rather
         -- than CASCADE: removing a person must not remove the record of
-        -- what they shipped.
+        -- what they shipped. (Nor who they were: 0005 adds the name.)
         published_by_user_id  TEXT REFERENCES users(id) ON DELETE SET NULL,
         published_by_token_id TEXT REFERENCES tokens(id) ON DELETE SET NULL,
         published_at          BIGINT NOT NULL,
@@ -459,6 +459,24 @@ pub(crate) const MIGRATIONS: &[&str] = &[
                       'packages.ecosystem', 'packages.policy', 'packages.reserve',
                       'packages.release', 'packages.forget_finding',
                       'packages.license_rule');
+
+    -- Who did it, by name, written down when it happened.
+    --
+    -- A version's publisher and an audit entry's actor were both a link
+    -- to the person's row and nothing else, so removing somebody erased
+    -- them from the record: `published_by_user_id` is SET NULL and every
+    -- version they shipped read "published by —", and every entry they
+    -- wrote read as a bare `user:<id>`. A username never changes, so the
+    -- name at the time is the name; the link stays for "what did this
+    -- person do?", and the name is what is left when the link is not.
+    -- Rows from before are named from the people still here — nobody
+    -- can recover the name of somebody already removed.
+    ALTER TABLE package_versions ADD COLUMN published_by_name TEXT;
+    UPDATE package_versions v SET published_by_name = u.username
+      FROM users u WHERE u.id = v.published_by_user_id;
+    ALTER TABLE audit_log ADD COLUMN actor_name TEXT;
+    UPDATE audit_log a SET actor_name = u.username
+      FROM users u WHERE u.id = a.user_id;
     "#,
 ];
 
@@ -1129,8 +1147,27 @@ mod tests {
                 )
                 .unwrap();
             }
-            c.batch_execute("INSERT INTO orgs (id, name, created_at) VALUES ('01ORG', 'acme', 1)")
-                .unwrap();
+            c.batch_execute(
+                "INSERT INTO orgs (id, name, created_at) VALUES ('01ORG', 'acme', 1);
+                 INSERT INTO users (id, username, role, created_at)
+                     VALUES ('01ADA', 'ada', 'publisher', 1);
+                 INSERT INTO packages (id, org_id, ecosystem, name, normalized_name, origin,
+                                       created_at, updated_at)
+                     VALUES ('01PKG', '01ORG', 'npm', '@acme/w', '@acme/w', 'local', 1, 1);
+                 -- By ada; by somebody removed before the upgrade (the
+                 -- link already NULL, and no name left to find); and a
+                 -- cached artifact nobody here published.
+                 INSERT INTO package_versions (id, package_id, version, normalized_version,
+                                               published_by_user_id, published_at)
+                     VALUES ('01V1', '01PKG', '1.0.0', '1.0.0', '01ADA', 1),
+                            ('01V2', '01PKG', '2.0.0', '2.0.0', NULL, 2),
+                            ('01V3', '01PKG', '3.0.0', '3.0.0', NULL, 3);
+                 -- One entry by ada, one by somebody already removed.
+                 INSERT INTO audit_log (at, org_id, principal, user_id, action, context)
+                     VALUES (1, '01ORG', 'user:01ADA', '01ADA', 'token.create', NULL),
+                            (1, '01ORG', 'user:01GONE', '01GONE', 'token.create', NULL);",
+            )
+            .unwrap();
             for (action, context) in [
                 (
                     "packages.yank",
@@ -1179,9 +1216,68 @@ mod tests {
         }
 
         let db = ControlDb::open(&url).expect("the upgrade applies to the rows already there");
+
+        // Names are written in for everybody still here to name.
+        let named: Vec<(String, Option<String>)> = db
+            .lock()
+            .query(
+                "SELECT version, published_by_name FROM package_versions ORDER BY version",
+                &[],
+            )
+            .unwrap()
+            .iter()
+            .map(|r| (r.get(0), r.get(1)))
+            .collect();
+        assert_eq!(
+            named,
+            [
+                ("1.0.0".to_string(), Some("ada".to_string())),
+                ("2.0.0".to_string(), None),
+                ("3.0.0".to_string(), None),
+            ]
+        );
+        let actors: Vec<(Option<String>, Option<String>)> = db
+            .lock()
+            .query(
+                "SELECT user_id, actor_name FROM audit_log WHERE user_id IS NOT NULL ORDER BY seq",
+                &[],
+            )
+            .unwrap()
+            .iter()
+            .map(|r| (r.get(0), r.get(1)))
+            .collect();
+        assert_eq!(
+            actors,
+            [
+                (Some("01ADA".to_string()), Some("ada".to_string())),
+                (Some("01GONE".to_string()), None),
+            ]
+        );
+        // …and ada, removed after the upgrade, is still named.
+        // (The statement `users::delete` runs; the seeded id is not in
+        // the shape it will look up.)
+        db.lock()
+            .execute("DELETE FROM users WHERE id = '01ADA'", &[])
+            .unwrap();
+        let v1 = crate::packages::version_by_number(&db, "01PKG", "1.0.0")
+            .unwrap()
+            .unwrap();
+        assert_eq!(v1.published_by_name.as_deref(), Some("ada"));
+        let theirs = crate::audit::recent(&db, "01ORG", None, 500).unwrap();
+        assert!(
+            theirs
+                .iter()
+                .any(|e| e.user_id.as_deref() == Some("01ADA")
+                    && e.username.as_deref() == Some("ada")),
+            "{theirs:?}"
+        );
+
         let rows = db
             .lock()
-            .query("SELECT action, context FROM audit_log ORDER BY seq", &[])
+            .query(
+                "SELECT action, context FROM audit_log WHERE user_id IS NULL ORDER BY seq",
+                &[],
+            )
             .unwrap();
         let actions: Vec<String> = rows.iter().map(|r| r.get("action")).collect();
         assert_eq!(

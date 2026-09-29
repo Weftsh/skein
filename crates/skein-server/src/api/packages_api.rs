@@ -63,6 +63,12 @@ fn version_json(v: &PackageVersion) -> serde_json::Value {
         "license_source": v.license_source,
         "size_bytes": v.size_bytes,
         "published_by": v.published_by_user_id,
+        // Who published it, by name — the id alone is not something a
+        // person reading the page can act on. The name written down at
+        // publish, not a lookup of the person's row: it used to be the
+        // lookup, and a removed person's every release read "—". A
+        // username never changes, so while they are here the two agree.
+        "published_by_username": v.published_by_name,
         "published_by_token": v.published_by_token_id,
         "published_at": v.published_at,
         "upstream_published_at": v.upstream_published_at,
@@ -209,24 +215,9 @@ pub async fn show(
         Ok(t) => t,
         Err(e) => return internal(e),
     };
-    // Who published each version, by name: the id alone is not
-    // something a person reading the page can act on.
-    let mut names: HashMap<String, String> = HashMap::new();
     let mut rendered = Vec::with_capacity(versions.len());
     for v in &versions {
         let mut j = version_json(v);
-        if let Some(uid) = &v.published_by_user_id {
-            if !names.contains_key(uid) {
-                match skein_control::users::by_id(&state.db, uid) {
-                    Ok(Some(u)) => {
-                        names.insert(uid.clone(), u.username);
-                    }
-                    Ok(None) => {}
-                    Err(e) => return internal(e),
-                }
-            }
-            j["published_by_username"] = serde_json::json!(names.get(uid));
-        }
         let files = match packages::files(&state.db, &v.id) {
             Ok(f) => f,
             Err(e) => return internal(e),

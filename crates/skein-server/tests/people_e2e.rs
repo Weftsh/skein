@@ -787,6 +787,112 @@ fn a_refusal_names_what_was_attempted() {
     assert!(server.healthy());
 }
 
+/// Removing a person does not erase who published what, or who did what.
+///
+/// A version's publisher was a link to the person's row, `SET NULL` when
+/// the row went, so the package page showed "—" for everything they had
+/// ever shipped; and the audit log named its actor by joining the same
+/// row, so Activity showed a bare `user:<id>`. The names are now written
+/// down when the act happens. Two doors, because every door records its
+/// publisher through one function and a second proves it is that one.
+#[test]
+fn removing_a_person_keeps_their_name_on_what_they_did() {
+    let bucket = Minio::shared().bucket("people-remove-names");
+    let server = spawn(&bucket.base_url, "people-remove-names");
+    let admin = server.bootstrap("acme");
+    let (xavier_id, xavier) = server.person(&admin, "xavier", "publisher", &["package:write"]);
+
+    let (s, body) = server.req(
+        "PUT",
+        "/npm/@acme%2fwidget",
+        &xavier,
+        Some(publish_doc("@acme/widget", "1.0.0", b"bytes")),
+    );
+    assert_eq!(s, 201, "{body}");
+    let jar = skein_testkit::server::send(
+        "PUT",
+        &server.url("/maven/com/acme/tool/1.0.0/tool-1.0.0.jar"),
+        &[("Authorization", &format!("Bearer {xavier}"))],
+        Some(b"PK\x03\x04 near enough"),
+    );
+    assert_eq!(jar.status, 201, "{}", jar.text());
+    let (_, listed) = server.get("/api/v1/packages", &admin);
+    let ids: Vec<(String, String)> = listed["packages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| {
+            (
+                p["name"].as_str().unwrap().to_string(),
+                p["id"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(ids.len(), 2, "{listed}");
+    let widget = &ids.iter().find(|(n, _)| n == "@acme/widget").unwrap().1;
+    let (s, body) = server.req(
+        "POST",
+        &format!("/api/v1/packages/{widget}/versions/1.0.0/yank"),
+        &xavier,
+        Some(serde_json::json!({ "yanked": true })),
+    );
+    assert_eq!(s, 200, "{body}");
+
+    let (s, body) = server.req(
+        "DELETE",
+        &format!("/api/v1/users/{xavier_id}"),
+        &admin,
+        None,
+    );
+    assert_eq!(s, 204, "{body}");
+    assert_eq!(server.get("/api/v1/me", &xavier).0, 401, "their token went");
+
+    for (name, id) in &ids {
+        let (s, shown) = server.get(&format!("/api/v1/packages/{id}"), &admin);
+        assert_eq!(s, 200, "{shown}");
+        let v = &shown["versions"][0];
+        assert_eq!(
+            v["published_by_username"], "xavier",
+            "{name} forgot who published it: {v}"
+        );
+    }
+
+    let (s, log) = server.get("/api/v1/audit", &admin);
+    assert_eq!(s, 200, "{log}");
+    let by: Vec<(&str, &str)> = log["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["principal"] != "system:bootstrap")
+        .map(|e| {
+            (
+                e["action"].as_str().unwrap_or_default(),
+                e["username"].as_str().unwrap_or("<nobody>"),
+            )
+        })
+        .collect();
+    for want in [
+        ("package.publish", "xavier"),
+        ("package.yank", "xavier"),
+        ("user.delete", "admin"),
+        ("user.create", "admin"),
+    ] {
+        assert!(by.contains(&want), "{want:?} not in {by:?}");
+    }
+    assert!(
+        by.iter().all(|(_, who)| *who != "<nobody>"),
+        "an entry lost its actor: {by:?}"
+    );
+    assert_eq!(
+        by.iter()
+            .filter(|(a, w)| *a == "package.publish" && *w == "xavier")
+            .count(),
+        2,
+        "{by:?}"
+    );
+    assert!(server.healthy());
+}
+
 /// Every refusal the REST API gives is `{"error": <a sentence>}`, which
 /// is the one thing the UI shows. A missing package used to answer the
 /// registry doors' bare-text `not found`, and the UI, finding no

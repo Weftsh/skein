@@ -374,8 +374,12 @@ pub fn set_disabled(db: &ControlDb, user_id: &str, disabled: bool) -> Result<(),
     })
 }
 
-/// Remove a person. Their tokens and sessions go with them (CASCADE);
-/// what they published stays, with the publisher set to nobody.
+/// Remove a person. Their tokens and sessions go with them (CASCADE).
+/// What they published stays, and so does who they were: a version
+/// keeps the name it was published under (`published_by_name`) and every
+/// audit entry the name it was written by (`actor_name`). Only the link
+/// to this row goes — `published_by_user_id` is set to NULL — so a
+/// person made later under the same name is not mistaken for them.
 pub fn delete(db: &ControlDb, user_id: &str) -> Result<(), ChangeError> {
     change_guarded(db, user_id, true, move |tx| {
         tx.execute("DELETE FROM users WHERE id = $1", &[&user_id])

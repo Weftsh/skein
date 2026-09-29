@@ -94,7 +94,7 @@ See [policy.md](policy.md) for what each control means.
 | `GET /api/v1/users` | everybody — `org:read` |
 | `POST /api/v1/users` | `{"username", "role", "password"?}` — no password makes a service account |
 | `PATCH /api/v1/users/:id` | `{"role"?, "disabled"?, "password"?, "display_name"?}` |
-| `DELETE /api/v1/users/:id` | their tokens go with them; what they published stays |
+| `DELETE /api/v1/users/:id` | their tokens go with them; what they published stays, and still names them as its publisher — as the audit log still names them on everything they did |
 | `GET /api/v1/users/:id/tokens` | their live tokens |
 | `POST /api/v1/users/:id/tokens` | mint a token for somebody — how a CI service account gets one |
 | `GET /api/v1/tokens` | every live token |

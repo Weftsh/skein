@@ -84,16 +84,23 @@ pub struct AuditEntry {
     pub at: i64,
     pub principal: String,
     pub user_id: Option<String>,
-    /// Resolved by join at read time, never copied into the row: an
-    /// audit entry records what happened, and a person's current name is
-    /// not part of what happened.
+    /// Who acted, by name: their row's, while they are here, and the
+    /// name written into the entry when it was recorded once they are
+    /// not. A username never changes, so the two agree; the second is
+    /// what keeps a removed person's acts from reading as a bare
+    /// `user:<id>`.
     pub username: Option<String>,
     pub action: String,
     pub context: Option<serde_json::Value>,
 }
 
-const INSERT: &str = "INSERT INTO audit_log (at, org_id, principal, user_id, action, context) \
-                      VALUES ($1, $2, $3, $4, $5, $6)";
+/// The actor's name is read from their row by the INSERT itself, the
+/// same way a version's publisher is: every caller would otherwise have
+/// to carry it, and the one that did not would write a nameless entry.
+const INSERT: &str = "INSERT INTO audit_log \
+                          (at, org_id, principal, user_id, action, context, actor_name) \
+                      VALUES ($1, $2, $3, $4, $5, $6, \
+                              (SELECT username FROM users WHERE id = $4))";
 
 pub fn record(
     db: &ControlDb,
@@ -129,7 +136,8 @@ pub fn recent(
     Ok(db
         .lock()
         .query(
-            "SELECT a.seq, a.at, a.principal, a.user_id, a.action, a.context, u.username \
+            "SELECT a.seq, a.at, a.principal, a.user_id, a.action, a.context, \
+                    COALESCE(u.username, a.actor_name) AS username \
              FROM audit_log a LEFT JOIN users u ON u.id = a.user_id \
              WHERE a.org_id = $1 AND ($2::int8 IS NULL OR a.seq < $2) \
              ORDER BY a.seq DESC LIMIT $3",
@@ -212,5 +220,36 @@ mod tests {
         let older = recent(&db, &org.id, Some(all[1].seq), 50).unwrap();
         assert_eq!(older.len(), 3);
         assert!(recent(&db, "someone-else", None, 50).unwrap().is_empty());
+    }
+
+    /// A person removed is still named on everything they did.
+    ///
+    /// The name used to be read only by joining to their row, so once
+    /// the row was gone every entry they had written said `user:<id>` and
+    /// nothing else — the trail read as a list of strangers exactly when
+    /// somebody was asking what a departed colleague had done.
+    #[test]
+    fn a_removed_person_is_still_named_on_what_they_did() {
+        let db = ControlDb::open(&skein_testkit::pg::test_db_url("audit_removed")).unwrap();
+        let org = crate::registry::create_org(&db, "acme").unwrap();
+        crate::users::create(&db, "root", crate::users::Role::Admin, None).unwrap();
+        let ada = crate::users::create(&db, "ada", crate::users::Role::Publisher, None).unwrap();
+        record(
+            &db,
+            &AuditCtx::of(&org.id, &Principal::for_user(&ada)),
+            "package.yank",
+            None,
+        )
+        .unwrap();
+        record(&db, &AuditCtx::system(&org.id, "gc"), "blob.collect", None).unwrap();
+        crate::users::delete(&db, &ada.id).unwrap();
+
+        let all = recent(&db, &org.id, None, 50).unwrap();
+        let yank = all.iter().find(|e| e.action == "package.yank").unwrap();
+        assert_eq!(yank.principal, format!("user:{}", ada.id));
+        assert_eq!(yank.user_id.as_deref(), Some(ada.id.as_str()));
+        assert_eq!(yank.username.as_deref(), Some("ada"), "{yank:?}");
+        let gc = all.iter().find(|e| e.action == "blob.collect").unwrap();
+        assert!(gc.username.is_none(), "the server is nobody: {gc:?}");
     }
 }

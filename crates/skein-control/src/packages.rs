@@ -419,6 +419,10 @@ pub struct PackageVersion {
     /// has since been removed — the version outlives them.
     pub published_by_user_id: Option<String>,
     pub published_by_token_id: Option<String>,
+    /// The publisher's username when they published — what is left to
+    /// say who shipped it once `published_by_user_id` is gone with the
+    /// person. `None` for a proxied artifact.
+    pub published_by_name: Option<String>,
     pub published_at: i64,
     /// When the upstream published it, for a proxied artifact. `None`
     /// for one this organization published — see [`Provenance`].
@@ -456,8 +460,8 @@ fn row_to_package(r: &postgres::Row) -> Result<Package, String> {
 
 const VER_COLS: &str = "id, package_id, version, normalized_version, yanked, yank_reason, \
                         license_expr, license_source, metadata, size_bytes, \
-                        published_by_user_id, published_by_token_id, published_at, \
-                        upstream_published_at";
+                        published_by_user_id, published_by_token_id, published_by_name, \
+                        published_at, upstream_published_at";
 
 fn row_to_version(r: &postgres::Row) -> PackageVersion {
     PackageVersion {
@@ -473,6 +477,7 @@ fn row_to_version(r: &postgres::Row) -> PackageVersion {
         size_bytes: r.get("size_bytes"),
         published_by_user_id: r.get("published_by_user_id"),
         published_by_token_id: r.get("published_by_token_id"),
+        published_by_name: r.get("published_by_name"),
         published_at: r.get("published_at"),
         upstream_published_at: r.get("upstream_published_at"),
     }
@@ -737,6 +742,10 @@ impl std::fmt::Display for PublishError {
 /// The files are written in the same transaction as the version row, so
 /// a version is never visible holding none of its bytes — a resolver
 /// that met that would cache the empty answer.
+///
+/// The publisher's name is read from their row by the INSERT itself,
+/// not handed in: five doors publish through here, and a name each of
+/// them supplied is a name one of them would one day supply wrongly.
 #[allow(clippy::too_many_arguments)]
 pub fn publish_version(
     db: &ControlDb,
@@ -774,9 +783,10 @@ pub fn publish_version(
                     "INSERT INTO package_versions \
                          (id, package_id, version, normalized_version, yanked, yank_reason, \
                           license_expr, license_source, metadata, size_bytes, \
-                          published_by_user_id, published_by_token_id, published_at, \
-                          upstream_published_at) \
-                     VALUES ($1, $2, $3, $4, FALSE, NULL, $5, $6, $7, $8, $9, $10, $11, $12) \
+                          published_by_user_id, published_by_token_id, published_by_name, \
+                          published_at, upstream_published_at) \
+                     VALUES ($1, $2, $3, $4, FALSE, NULL, $5, $6, $7, $8, $9, $10, \
+                             (SELECT username FROM users WHERE id = $9), $11, $12) \
                      ON CONFLICT (package_id, normalized_version) DO NOTHING \
                      RETURNING {VER_COLS}"
                 ),
@@ -2657,13 +2667,40 @@ mod tests {
         assert_eq!(v.published_by_user_id.as_deref(), Some(ada.id.as_str()));
         assert_eq!(v.published_by_token_id.as_deref(), Some(tok.id.as_str()));
 
-        // Removing the person keeps what they shipped.
+        assert_eq!(v.published_by_name.as_deref(), Some("ada"));
+
+        // Removing the person keeps what they shipped — and who they
+        // were. The link to their row goes with the row; the name was
+        // written down when they published, because "published by —" on
+        // everything a departed colleague ever shipped is a record with
+        // its most useful fact missing.
         crate::users::create(&db, "root", crate::users::Role::Admin, None).unwrap();
         crate::users::delete(&db, &ada.id).unwrap();
         let after = version_by_number(&db, &p.id, "1.0.0").unwrap().unwrap();
         assert_eq!(after.id, v.id);
         assert!(after.published_by_user_id.is_none());
         assert!(after.published_by_token_id.is_none());
+        assert_eq!(after.published_by_name.as_deref(), Some("ada"));
+        assert_eq!(
+            versions(&db, &p.id).unwrap()[0]
+                .published_by_name
+                .as_deref(),
+            Some("ada")
+        );
+
+        // Nobody published a cached artifact, and it says so.
+        let cached = publish_version(
+            &db,
+            &p.id,
+            "2.0.0",
+            &License::Unknown,
+            "{}",
+            &[file("w2.tgz", 10)],
+            &Provenance::default(),
+            11,
+        )
+        .unwrap();
+        assert!(cached.published_by_name.is_none());
     }
 
     /// Yank hides a version; it does not remove it. A lockfile that
