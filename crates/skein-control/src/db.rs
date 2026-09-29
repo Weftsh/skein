@@ -485,6 +485,40 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     ALTER TABLE org_license_rules ADD COLUMN display_id TEXT;
     UPDATE org_license_rules SET display_id = spdx_id;
     ALTER TABLE org_license_rules ALTER COLUMN display_id SET NOT NULL;
+
+    -- The npm scopes that are this organization's, and the only ones it
+    -- publishes under.
+    --
+    -- Any name used to publish — unscoped, or under anybody's scope —
+    -- while the `.npmrc` every client is handed routes only `@<org>` to
+    -- Skein. So an install of an unscoped or foreign-scope internal
+    -- package went to public npmjs, where anybody can own the name, and a
+    -- build installed a stranger's bytes believing them ours: dependency
+    -- confusion. With publishing held to this list, every name here is
+    -- one a scoped `.npmrc` routes here, and a name under one of these is
+    -- never fetched from an upstream, published or not.
+    --
+    -- Stored as npm writes a scope: `@` and lowercase. Seeded with
+    -- `@<org>`, and with the scope of every scoped package this
+    -- organization has published (not cached), so nothing it already
+    -- publishes stops. An unscoped package gets nothing: it keeps
+    -- installing, and takes no new version.
+    CREATE TABLE org_npm_scopes (
+        org_id     TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+        scope      TEXT NOT NULL,
+        created_at BIGINT NOT NULL,
+        PRIMARY KEY (org_id, scope)
+    );
+    INSERT INTO org_npm_scopes (org_id, scope, created_at)
+        SELECT id, '@' || name, (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::BIGINT
+          FROM orgs
+    ON CONFLICT DO NOTHING;
+    INSERT INTO org_npm_scopes (org_id, scope, created_at)
+        SELECT DISTINCT org_id, split_part(normalized_name, '/', 1),
+               (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::BIGINT
+          FROM packages
+         WHERE ecosystem = 'npm' AND origin = 'local' AND normalized_name LIKE '@%/%'
+    ON CONFLICT DO NOTHING;
     "#,
 ];
 
@@ -1138,8 +1172,8 @@ mod tests {
         let url = skein_testkit::pg::test_db_url("db_0005_upgrade");
         let at = MIGRATIONS
             .iter()
-            .position(|m| m.contains("'packages.license_rule'"))
-            .expect("the migration that renames the audit actions");
+            .position(|m| m.contains("CREATE TABLE org_npm_scopes"))
+            .expect("the migration that adds the organization's npm scopes");
         {
             let mut c = Client::connect(&url, NoTls).unwrap();
             c.batch_execute(
@@ -1161,7 +1195,16 @@ mod tests {
                      VALUES ('01ADA', 'ada', 'publisher', 1);
                  INSERT INTO packages (id, org_id, ecosystem, name, normalized_name, origin,
                                        created_at, updated_at)
-                     VALUES ('01PKG', '01ORG', 'npm', '@acme/w', '@acme/w', 'local', 1, 1);
+                     VALUES ('01PKG', '01ORG', 'npm', '@acme/w', '@acme/w', 'local', 1, 1),
+                            -- Published here under a partner's scope,
+                            -- twice: that scope is the organization's.
+                            ('01P2', '01ORG', 'npm', '@Partner/x', '@partner/x', 'local', 1, 1),
+                            ('01P3', '01ORG', 'npm', '@partner/y', '@partner/y', 'local', 1, 1),
+                            -- Cached from upstream, unscoped, or not
+                            -- npm: none of them makes a scope.
+                            ('01P4', '01ORG', 'npm', '@cached/z', '@cached/z', 'proxied', 1, 1),
+                            ('01P5', '01ORG', 'npm', 'plain', 'plain', 'local', 1, 1),
+                            ('01P6', '01ORG', 'oci', '@oci/image', '@oci/image', 'local', 1, 1);
                  -- By ada; by somebody removed before the upgrade (the
                  -- link already NULL, and no name left to find); and a
                  -- cached artifact nobody here published.
@@ -1227,6 +1270,27 @@ mod tests {
         }
 
         let db = ControlDb::open(&url).expect("the upgrade applies to the rows already there");
+
+        // Its own scope, and the scope of every scoped package it
+        // published — nothing it publishes stops publishing — and nothing
+        // else: not a cached package's, not another ecosystem's.
+        assert_eq!(
+            crate::packages::npm_scopes(&db, "01ORG").unwrap(),
+            ["@acme", "@partner"]
+        );
+        assert_eq!(
+            crate::packages::npm_scope_counts(&db, "01ORG").unwrap(),
+            [
+                crate::packages::NpmScope {
+                    scope: "@acme".into(),
+                    packages: 1
+                },
+                crate::packages::NpmScope {
+                    scope: "@partner".into(),
+                    packages: 2
+                },
+            ]
+        );
 
         // A rule from before is shown the only way anybody still has it.
         assert_eq!(

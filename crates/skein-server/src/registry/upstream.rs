@@ -5,10 +5,17 @@
 //! own
 //!
 //! The order in the npm door is: look locally, and go
-//! upstream only for a name this organization has never published and
-//! has not reserved. Anything else builds dependency confusion into the
-//! product — a public `@acme/widget` could answer for the private one,
-//! and a build would install a stranger's bytes under our own scope.
+//! upstream only for a name this organization has never published, has
+//! not reserved, and that is not under one of its npm scopes. Anything
+//! else builds dependency confusion into the product — a public
+//! `@acme/widget` could answer for the private one, and a build would
+//! install a stranger's bytes under our own scope.
+//!
+//! The scopes are the strongest of the three, because npm publishing is
+//! held to them: a name under one is ours whether or not anybody has
+//! published it yet, so it is never asked about, in audit mode as in
+//! block mode. A reservation in audit mode records and serves, which is
+//! what audit means; a scope is not a policy choice to audit.
 //!
 //! ## Filter the metadata document, do not pass it through
 //!

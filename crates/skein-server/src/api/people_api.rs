@@ -737,11 +737,19 @@ pub async fn overview(State(state): State<SharedState>, headers: HeaderMap) -> R
         Ok(f) => f.len(),
         Err(e) => return internal(e),
     };
+    // Every member reads this, and the Connect page routes every scope
+    // in the `.npmrc` it hands out: a scope left out of the snippet is a
+    // scope whose installs go to npmjs.
+    let npm_scopes = match packages::npm_scopes(&state.db, &org.id) {
+        Ok(s) => s,
+        Err(e) => return internal(e),
+    };
     Json(serde_json::json!({
         "org": { "name": state.org_name(), "created_at": org.created_at },
         "public_url": state.public_url.trim_end_matches('/'),
         "stored_bytes": bytes,
         "findings": findings,
+        "npm_scopes": npm_scopes,
         "ecosystems": policies.iter().map(|p| {
             let n = counts.iter().find(|(e, _)| *e == p.ecosystem).map(|(_, n)| *n).unwrap_or(0);
             serde_json::json!({
@@ -763,7 +771,8 @@ pub struct OrgBody {
 }
 
 /// `PUT /api/v1/org` — rename the organization. The id, and so every
-/// stored key, stays.
+/// stored key, stays; the new name's npm scope is added and the old one
+/// kept (see `registry::rename_org`).
 pub async fn rename_org(
     State(state): State<SharedState>,
     headers: HeaderMap,
@@ -773,14 +782,15 @@ pub async fn rename_org(
         Ok(p) => p,
         Err(r) => return r,
     };
-    if let Err(e) = skein_control::registry::rename_org(&state.db, &state.org().id, &body.name) {
-        return json_error(StatusCode::BAD_REQUEST, e);
-    }
+    let scope = match skein_control::registry::rename_org(&state.db, &state.org().id, &body.name) {
+        Ok(s) => s,
+        Err(e) => return json_error(StatusCode::BAD_REQUEST, e),
+    };
     audit(
         &state,
         &caller,
         "org.rename",
-        serde_json::json!({ "name": body.name }),
+        serde_json::json!({ "name": body.name, "npm_scope": scope }),
     );
     Json(serde_json::json!({ "name": body.name })).into_response()
 }

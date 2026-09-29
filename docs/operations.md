@@ -340,7 +340,7 @@ taken before the upgrade.
 
 | | |
 |---|---|
-| `bootstrap --org <name>` | create the organization and its first admin, once |
+| `bootstrap --org <name>` | create the organization, its npm scope `@<name>`, and its first admin, once |
 | `create-user <name> [--role reader\|publisher\|admin] [--no-password]` | add a person, or a CI service account with `--no-password` |
 | `reset-password <name>` | a new password, and signed out everywhere |
 | `set-role <name> <role>` | change what somebody may do |

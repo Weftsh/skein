@@ -171,6 +171,12 @@ pub fn router(state: SharedState) -> Router {
             "/findings",
             get(packages_api::findings).delete(packages_api::forget_finding),
         )
+        .route(
+            "/npm/scopes",
+            get(packages_api::npm_scopes)
+                .post(packages_api::add_npm_scope)
+                .delete(packages_api::remove_npm_scope),
+        )
         .fallback(|| async { crate::api::json_error(StatusCode::NOT_FOUND, "no such API route") })
         // After every route and the fallback, so it wraps all of them.
         .layer(middleware::from_fn(crate::api::json_refusals));

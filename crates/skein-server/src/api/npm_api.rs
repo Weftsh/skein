@@ -508,6 +508,22 @@ pub async fn put(
         }
     }
 
+    // Only under the organization's own scopes, and before anything is
+    // written — `ensure` would create the package row. The `.npmrc`
+    // every client is handed routes those scopes here and nothing else,
+    // so a name outside them is one `npm install` sends to public npmjs,
+    // where anybody can own it: an internal package published unscoped
+    // was one a stranger could shadow for every build that installed it.
+    // Every new version, including of a package from before this rule.
+    let scopes = match packages::npm_scopes(&state.db, &org.id) {
+        Ok(s) => s,
+        Err(e) => return internal(e),
+    };
+    let own = skein_control::registry::own_npm_scope(&state.org_name());
+    if let Some(sentence) = npm::scope_refusal(&publish.name, &scopes, &own) {
+        return npm_error(StatusCode::FORBIDDEN, sentence);
+    }
+
     let now = skein_control::ids::now_ms();
     let pkg = match packages::ensure(
         &state.db,
@@ -620,11 +636,15 @@ pub async fn put(
 /// a reserved name is never fetched:
 ///
 /// 1. the ecosystem is not in `proxy` mode → the ordinary 404;
-/// 2. the name is inside a reserved namespace → refused, and **not**
-///    fetched, because that is the dependency-confusion defence for a
-///    name we have not published yet;
-/// 3. the upstream does not have it → 404;
-/// 4. otherwise the document is filtered to the versions the policy
+/// 2. the name is under one of the organization's npm scopes → **not**
+///    fetched, in any mode: what is cached is served, and otherwise it
+///    is the ordinary 404. Publishing is held to those scopes, so such
+///    a name is ours whether or not anybody has published it yet, and
+///    asking would install whoever registered it upstream first;
+/// 3. the name is inside a reserved namespace → refused, and not
+///    fetched, in block mode — audit mode records it and goes on;
+/// 4. the upstream does not have it → 404;
+/// 5. otherwise the document is filtered to the versions the policy
 ///    admits, with every tarball pointed back at us.
 async fn proxied_packument(
     state: SharedState,
@@ -660,6 +680,10 @@ async fn proxied_packument(
         Ok(a) => a,
         Err(e) => return internal(e),
     };
+    // Ours, published or not: never asked about, whatever the mode.
+    if npm::under_scopes(&name, &admission.npm_scopes) {
+        return from_cache(state, org, cached, base).await;
+    }
     let licences = licence_policy(&admission);
     let now = skein_control::ids::now_ms();
 
@@ -822,6 +846,11 @@ async fn proxied_tarball(state: SharedState, org: Org, name: String, filename: S
         Ok(a) => a,
         Err(e) => return internal(e),
     };
+    // Under the organization's own scopes: never fetched, in any mode —
+    // see `proxied_packument`. A lockfile goes straight here.
+    if npm::under_scopes(&name, &admission.npm_scopes) {
+        return npm_error(StatusCode::NOT_FOUND, "no such tarball");
+    }
     if admission
         .reserved
         .iter()

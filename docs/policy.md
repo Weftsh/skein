@@ -53,10 +53,17 @@ you have not created yet. If somebody registers `@acme/new-service` on
 npmjs this morning and a build asks for it this afternoon, without a
 reservation they get theirs.
 
-So: reserve your scope.
+Your organization's **npm scopes** are covered already: npm publishing
+is held to them (see [npm.md](npm.md#only-under-your-organizations-scopes)),
+so a name under one of them is never fetched from upstream, published or
+not — in audit mode as well as block mode, which is where a scope differs
+from a reservation. A scope is matched whole: `@acme` is not `@acme-corp`.
+
+For any other name you want to keep — a partner's scope you depend on, a
+prefix in another ecosystem — reserve it:
 
 ```
-Admission policy → Names that are yours → @acme
+Admission policy → Names that are yours → @partner
 ```
 
 Prefixes match on a **segment boundary**, never as a bare substring.
@@ -65,9 +72,12 @@ Prefixes match on a **segment boundary**, never as a bare substring.
 implementation and would reserve half the registry by accident — an
 organization claiming `@ac` would silently take `@acme` too.
 
-A reserved name is refused *without asking the upstream at all*. That is
-deliberate beyond the refusal itself: asking would tell npmjs which
-internal names your organization uses.
+In `block` mode a reserved name is refused *without asking the upstream
+at all*. That is deliberate beyond the refusal itself: asking would tell
+npmjs which internal names your organization uses. In `audit` mode it is
+fetched and served like everything else, and the finding written down —
+which is what audit means. Your npm scopes are the exception: never
+fetched in either mode.
 
 ### 2. How long a release must exist before you will take it
 

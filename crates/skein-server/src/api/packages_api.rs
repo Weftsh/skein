@@ -584,6 +584,97 @@ pub async fn release(
     StatusCode::NO_CONTENT.into_response()
 }
 
+// ---------------------------------------------------------------------
+// npm scopes: the only ones npm packages are published under, and never
+// fetched from an upstream. Reading is `org:read` — the Connect page
+// routes every one of them in its `.npmrc` — and changing them is
+// `org:admin`, like everything else about what the registry admits.
+// ---------------------------------------------------------------------
+
+#[derive(Deserialize)]
+pub struct ScopeBody {
+    pub scope: String,
+}
+
+/// `GET /api/v1/npm/scopes` — `{"scopes": [{"scope", "packages"}]}`,
+/// sorted; `packages` counts what was published here under each.
+pub async fn npm_scopes(State(state): State<SharedState>, headers: HeaderMap) -> Response {
+    let org = state.org();
+    if let Err(r) = authx::require(&state.db, &headers, Scope::OrgRead, Challenge::None) {
+        return r;
+    }
+    match packages::npm_scope_counts(&state.db, &org.id) {
+        Ok(scopes) => Json(serde_json::json!({ "scopes": scopes })).into_response(),
+        Err(e) => internal(e),
+    }
+}
+
+/// `POST /api/v1/npm/scopes` `{"scope"}` — 201 when added, 200 when it
+/// was already there (adding is idempotent), 400 for what npm would not
+/// take as a scope.
+pub async fn add_npm_scope(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(body): Json<ScopeBody>,
+) -> Response {
+    let org = state.org();
+    let caller = match authx::require(&state.db, &headers, Scope::OrgAdmin, Challenge::None) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    let now = skein_control::ids::now_ms();
+    let (scope, added) = match packages::add_npm_scope(&state.db, &org.id, &body.scope, now) {
+        Ok(x) => x,
+        Err(e) => return json_error(StatusCode::BAD_REQUEST, e),
+    };
+    if !added {
+        return Json(scope).into_response();
+    }
+    audit(
+        &state,
+        &caller,
+        "policy.npm_scope.add",
+        serde_json::json!({ "scope": scope.scope }),
+    );
+    (StatusCode::CREATED, Json(scope)).into_response()
+}
+
+/// `DELETE /api/v1/npm/scopes?scope=` — 204; 409 while packages are
+/// published under it; 404 when it is not one of the organization's.
+pub async fn remove_npm_scope(
+    State(state): State<SharedState>,
+    Query(q): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> Response {
+    let org = state.org();
+    let caller = match authx::require(&state.db, &headers, Scope::OrgAdmin, Challenge::None) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    let asked = q.get("scope").map(String::as_str).unwrap_or("");
+    match packages::remove_npm_scope(&state.db, &org.id, asked) {
+        Ok(packages::ScopeRemoval::Removed(scope)) => {
+            audit(
+                &state,
+                &caller,
+                "policy.npm_scope.remove",
+                serde_json::json!({ "scope": scope }),
+            );
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Ok(packages::ScopeRemoval::Absent) => not_found("no such npm scope"),
+        Ok(packages::ScopeRemoval::Holds(scope, n)) => json_error(
+            StatusCode::CONFLICT,
+            if n == 1 {
+                format!("{scope} holds 1 package; delete it before removing the scope")
+            } else {
+                format!("{scope} holds {n} packages; delete them before removing the scope")
+            },
+        ),
+        Err(e) => internal(e),
+    }
+}
+
 /// `GET /api/v1/findings` — what the policy has caught.
 ///
 /// This is the screen that makes audit mode worth having: a week of

@@ -456,6 +456,54 @@ impl PartialOrd for Semver<'_> {
     }
 }
 
+/// Whether `name` is under one of the organization's npm scopes.
+///
+/// The scope is compared whole and as npm folds it: `@ACME/x` is under
+/// `@acme`, and `@acme-corp/x` and `@acmecorp/x` are not — they are
+/// somebody else's. Not `policy::namespace_covers`, which reads `-` as a
+/// segment boundary so that a reserved `acme` covers `acme-utils`; for a
+/// scope that would take another owner's scope for ours.
+pub fn under_scopes(name: &str, scopes: &[String]) -> bool {
+    let name = name.trim().to_ascii_lowercase();
+    skein_control::packages::npm_scope_of(&name).is_some_and(|s| scopes.iter().any(|o| o == s))
+}
+
+/// Why `name` may not be published here — the sentence npm prints — or
+/// `None` when it may.
+///
+/// npm publishing is held to the organization's scopes, because the
+/// `.npmrc` every client is handed routes only those here: a name outside
+/// them is one an install sends to public npmjs, where anybody can own
+/// it. `own` is the organization's own scope, `@<name>`, which a
+/// suggestion prefers; `scopes` is sorted.
+pub fn scope_refusal(name: &str, scopes: &[String], own: &str) -> Option<String> {
+    let name = name.trim();
+    let listed = scopes.join(", ");
+    let folded = name.to_ascii_lowercase();
+    match skein_control::packages::npm_scope_of(&folded) {
+        Some(scope) if scopes.iter().any(|s| s == scope) => None,
+        Some(scope) if scopes.is_empty() => Some(format!(
+            "{scope} is not one of this organization's npm scopes, and it has none yet — an \
+             admin can add it under Admission policy"
+        )),
+        Some(scope) => Some(format!(
+            "{scope} is not one of this organization's npm scopes ({listed}) — an admin can add \
+             it under Admission policy"
+        )),
+        None if scopes.is_empty() => Some(format!(
+            "npm packages here are published under this organization's scopes, and it has none \
+             yet; \"{name}\" has no scope — an admin can add one under Admission policy"
+        )),
+        None => {
+            let suggest = scopes.iter().find(|s| *s == own).unwrap_or(&scopes[0]);
+            Some(format!(
+                "npm packages here are published under this organization's scopes ({listed}); \
+                 \"{name}\" has no scope — publish it as {suggest}/{name}"
+            ))
+        }
+    }
+}
+
 /// `sha512-<base64>`, npm's Subresource Integrity spelling.
 pub fn integrity_of(body: &[u8]) -> String {
     use sha2::Digest as _;
@@ -1068,6 +1116,52 @@ mod tests {
             doc["dist-tags"]["stable"], "1.0.0",
             "a tag that does resolve was dropped too: {doc}"
         );
+    }
+
+    /// Which names may be published, and what npm prints for the ones
+    /// that may not — every shape, including an organization an admin
+    /// has left with no scope at all.
+    #[test]
+    fn a_publish_outside_the_organizations_scopes_is_refused_in_words() {
+        let scopes = vec!["@acme".to_string(), "@old".to_string()];
+        for ok in ["@acme/widget", "@ACME/Widget", " @old/thing "] {
+            assert_eq!(scope_refusal(ok, &scopes, "@acme"), None, "{ok}");
+            assert!(under_scopes(ok, &scopes), "{ok}");
+        }
+        for foreign in ["@acme-corp/x", "@acmecorp/x", "@acm/x", "plain"] {
+            assert!(!under_scopes(foreign, &scopes), "{foreign}");
+        }
+        assert_eq!(
+            scope_refusal("plain-name", &scopes, "@acme").as_deref(),
+            Some(
+                "npm packages here are published under this organization's scopes (@acme, \
+                 @old); \"plain-name\" has no scope — publish it as @acme/plain-name"
+            )
+        );
+        // The suggestion is the organization's own scope while it has it…
+        let renamed = vec!["@acme".to_string(), "@acme-corp".to_string()];
+        assert!(scope_refusal("w", &renamed, "@acme-corp")
+            .unwrap()
+            .ends_with("publish it as @acme-corp/w"));
+        // …and the first there is when an admin removed it.
+        assert!(scope_refusal("w", &scopes, "@gone")
+            .unwrap()
+            .ends_with("publish it as @acme/w"));
+        assert_eq!(
+            scope_refusal("@ZZZ/thing", &scopes, "@acme").as_deref(),
+            Some(
+                "@zzz is not one of this organization's npm scopes (@acme, @old) — an admin can \
+                 add it under Admission policy"
+            )
+        );
+        let none: Vec<String> = Vec::new();
+        assert!(scope_refusal("@zzz/thing", &none, "@acme")
+            .unwrap()
+            .contains("it has none yet"));
+        assert!(scope_refusal("plain", &none, "@acme")
+            .unwrap()
+            .contains("an admin can add one"));
+        assert!(!under_scopes("@acme/x", &none));
     }
 
     /// Semver's own precedence example, in order, and the cases a

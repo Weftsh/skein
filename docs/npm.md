@@ -17,7 +17,10 @@ registry and leaves everything else where it was.
 
 `@acme/*` now resolves here and everything else at npmjs. Mint the token
 in the UI under **Connect a client** or **Your tokens** —
-`package:read` to install, `package:write` to publish.
+`package:read` to install, `package:write` to publish. If your
+organization has more than one npm scope (see below), route each of
+them the same way; the **Connect a client** page writes a line for
+every one.
 
 Or let npm get one for you:
 
@@ -62,6 +65,57 @@ export NODE_EXTRA_CA_CERTS=/etc/pki/acme-ca.pem
 ```sh
 npm publish
 ```
+
+### Only under your organization's scopes
+
+npm packages here are published under the organization's own **npm
+scopes**, and nowhere else. A new install has one, `@<organization>` —
+`@acme` for `skein admin bootstrap --org acme` — and a name outside the
+list is refused before anything is stored, in a sentence `npm publish`
+prints:
+
+```text
+npm error 403 403 Forbidden - PUT https://skein.example.com/npm/plain-name -
+  npm packages here are published under this organization's scopes (@acme);
+  "plain-name" has no scope — publish it as @acme/plain-name
+```
+
+The reason is **dependency confusion**. The `.npmrc` above sends
+`@acme/*` to Skein and everything else to public npmjs, which is what
+lets a build use both. So an internal package published as `plain-name`,
+or as `@someone-else/thing`, is one that `npm install` asks npmjs for —
+and on npmjs anybody can register that name. The first person who does
+has their code installed in your builds, under a name everybody believes
+is yours. Holding publishing to your own scopes means every internal
+package is one your `.npmrc` routes here, so npmjs is never asked for
+it.
+
+To publish under another scope — a second product line, a scope you
+already use on npmjs — an admin adds it under **Admission policy → npm
+scopes**, or:
+
+```sh
+curl -X POST https://skein.example.com/api/v1/npm/scopes \
+  -H "Authorization: Bearer $ADMIN_TOKEN" -H "Content-Type: application/json" \
+  -d '{ "scope": "@acme-labs" }'
+```
+
+A scope is stored as npm writes it, `@` and lowercase. Removing one
+(`DELETE /api/v1/npm/scopes?scope=@acme-labs`) is refused while packages
+are published under it; delete them first.
+
+**Renaming the organization adds the new name's scope and keeps the
+old one.** The client snippets are written with the organization's name,
+so after a rename new `.npmrc` files route the new scope — and every
+package already published under the old one keeps publishing and
+installing.
+
+A package published before this rule existed with no scope at all keeps
+installing, by exact version and by range, but takes no new versions:
+publish its next release under a scope.
+
+A name under one of your scopes is **never fetched from an upstream
+registry**, published yet or not — see [the proxy](#everything-through-skein-the-proxy).
 
 The registry reads the name and version from `package.json`. Publishing
 a version that already exists is refused with a `409` — a published
@@ -117,7 +171,33 @@ unless `SKEIN_UPSTREAM_NPM` names another (an internal mirror needs
 
 Your own packages always win: a name you have published locally is
 never fetched from upstream, and a name cached from upstream cannot be
-published over.
+published over. A name under one of your organization's npm scopes is
+never fetched from upstream **at all**, published or not, in audit mode
+as in block mode: publishing is held to those scopes, so `@acme/new-thing`
+is yours before anybody has published it, and asking npmjs for it would
+install whoever registered it there first. It answers `404` until you
+publish it here.
+
+### When the policy refuses a version
+
+The admission policy decides **per version, when the metadata is
+read**: the packument npm receives lists only the versions the policy
+admits (the header of `registry/upstream.rs` explains why — a client
+handed every version resolves to one the tarball door then refuses,
+which reads as a broken registry rather than a decision). So a refused
+version is not refused with a reason in the terminal; to npm it simply
+is not there:
+
+```text
+npm error code ETARGET
+npm error notarget No matching version found for left-pad@2.0.0.
+```
+
+If no version at all is admitted, that is the whole answer. The reason —
+which rule refused which version, and how often it was asked for — is on
+the admin's **What it caught** page (`GET /api/v1/findings`). A lockfile
+install, which goes straight to the tarball without reading a packument,
+gets `403` with the reason itself.
 
 ## Limits
 

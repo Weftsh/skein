@@ -69,7 +69,7 @@ in [operations.md](operations.md#sign-in-protection).
 | `GET /api/v1/packages/:id` | the package, its versions (licence, publisher, files and digests) and tags |
 | `POST /api/v1/packages/:id/versions/:version/yank` | `{"yanked": true, "reason"?}` — `package:write`. A yanked version still installs by exact version |
 | `DELETE /api/v1/packages/:id` | remove every version — `org:admin`. Its bytes are collected later |
-| `GET /api/v1/overview` | package counts per ecosystem, stored bytes, findings |
+| `GET /api/v1/overview` | package counts per ecosystem, stored bytes, findings, and `npm_scopes`: the organization's npm scopes, sorted |
 
 ## The registry and its policy
 
@@ -84,6 +84,9 @@ in [operations.md](operations.md#sign-in-protection).
 | `DELETE /api/v1/policy/namespaces?ecosystem=&pattern=` | release one |
 | `GET /api/v1/findings?limit=` | what the policy refused, or would have in audit mode, with hit counts |
 | `DELETE /api/v1/findings?ecosystem=&name=&version=` | dismiss one. It does not allow the package; change the rule for that |
+| `GET /api/v1/npm/scopes` | `{"scopes": [{"scope", "packages"}]}`, sorted — the only scopes npm packages are published under, with how many are published under each — `org:read` |
+| `POST /api/v1/npm/scopes` | `{"scope": "@acme-labs"}` — add one: **201**, or **200** if it was already there; **400** for what npm would not take as a scope |
+| `DELETE /api/v1/npm/scopes?scope=` | remove one: **204**; **409** while packages are published under it; **404** if it is not one |
 
 See [policy.md](policy.md) for what each control means.
 
@@ -98,7 +101,7 @@ See [policy.md](policy.md) for what each control means.
 | `GET /api/v1/users/:id/tokens` | their live tokens |
 | `POST /api/v1/users/:id/tokens` | mint a token for somebody — how a CI service account gets one |
 | `GET /api/v1/tokens` | every live token |
-| `PUT /api/v1/org` | `{"name"}` — rename; stored keys use an id that never changes |
+| `PUT /api/v1/org` | `{"name"}` — rename; stored keys use an id that never changes. The new name's npm scope is added and the old one kept, so packages under it keep publishing |
 | `GET /api/v1/audit?before=&limit=` | the audit log, newest first |
 
 The last active admin cannot be demoted, disabled or deleted: those

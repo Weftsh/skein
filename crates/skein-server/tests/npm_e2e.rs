@@ -82,17 +82,21 @@ fn republishing_a_version_is_refused_and_changes_nothing() {
     let first = b"the original bytes";
     let (status, _) = server.req(
         "PUT",
-        "/npm/widget",
+        "/npm/@acme%2fwidget",
         &admin,
-        Some(publish_doc("widget", "1.0.0", first)),
+        Some(publish_doc("@acme/widget", "1.0.0", first)),
     );
     assert_eq!(status, 201);
 
     let (status, body) = server.req(
         "PUT",
-        "/npm/widget",
+        "/npm/@acme%2fwidget",
         &admin,
-        Some(publish_doc("widget", "1.0.0", b"entirely different bytes")),
+        Some(publish_doc(
+            "@acme/widget",
+            "1.0.0",
+            b"entirely different bytes",
+        )),
     );
     assert_eq!(status, 409, "a republish was accepted: {body}");
     assert!(
@@ -103,7 +107,7 @@ fn republishing_a_version_is_refused_and_changes_nothing() {
         "{body}"
     );
 
-    let (_, doc) = server.get("/npm/widget", &admin);
+    let (_, doc) = server.get("/npm/@acme%2fwidget", &admin);
     let url = doc["versions"]["1.0.0"]["dist"]["tarball"]
         .as_str()
         .expect("a tarball url");
@@ -125,9 +129,9 @@ fn a_yanked_version_is_marked_and_still_downloadable() {
     let tarball = b"bytes somebody already pinned";
     server.req(
         "PUT",
-        "/npm/widget",
+        "/npm/@acme%2fwidget",
         &admin,
-        Some(publish_doc("widget", "1.0.0", tarball)),
+        Some(publish_doc("@acme/widget", "1.0.0", tarball)),
     );
     let (_, listed) = server.get("/api/v1/packages", &admin);
     let pkg_id = listed["packages"][0]["id"]
@@ -144,7 +148,7 @@ fn a_yanked_version_is_marked_and_still_downloadable() {
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["yanked"], true);
 
-    let (_, doc) = server.get("/npm/widget", &admin);
+    let (_, doc) = server.get("/npm/@acme%2fwidget", &admin);
     assert!(
         doc["versions"]["1.0.0"]["deprecated"].is_string(),
         "a yanked version is not marked: {doc}"
@@ -328,21 +332,21 @@ fn a_reader_installs_and_is_told_why_they_may_not_publish() {
     let admin = server.bootstrap("acme");
     server.req(
         "PUT",
-        "/npm/widget",
+        "/npm/@acme%2fwidget",
         &admin,
-        Some(publish_doc("widget", "1.0.0", b"bytes")),
+        Some(publish_doc("@acme/widget", "1.0.0", b"bytes")),
     );
     let (_, reader) = server.person(&admin, "rita", "reader", &["package:read"]);
     let (_, ci) = server.person(&admin, "ci", "publisher", &["package:read"]);
 
-    let (status, doc) = server.get("/npm/widget", &reader);
+    let (status, doc) = server.get("/npm/@acme%2fwidget", &reader);
     assert_eq!(status, 200, "{doc}");
 
     let (status, body) = server.req(
         "PUT",
-        "/npm/widget",
+        "/npm/@acme%2fwidget",
         &reader,
-        Some(publish_doc("widget", "2.0.0", b"more bytes")),
+        Some(publish_doc("@acme/widget", "2.0.0", b"more bytes")),
     );
     assert_eq!(status, 403, "{body}");
     let why = body["error"].as_str().unwrap_or_default();
@@ -352,9 +356,9 @@ fn a_reader_installs_and_is_told_why_they_may_not_publish() {
     // is the limit, because the fix is different.
     let (status, body) = server.req(
         "PUT",
-        "/npm/widget",
+        "/npm/@acme%2fwidget",
         &ci,
-        Some(publish_doc("widget", "2.0.0", b"more bytes")),
+        Some(publish_doc("@acme/widget", "2.0.0", b"more bytes")),
     );
     assert_eq!(status, 403, "{body}");
     assert!(
@@ -366,7 +370,7 @@ fn a_reader_installs_and_is_told_why_they_may_not_publish() {
     );
 
     // Nothing was published by either refusal.
-    let (_, doc) = server.get("/npm/widget", &admin);
+    let (_, doc) = server.get("/npm/@acme%2fwidget", &admin);
     assert!(doc["versions"].get("2.0.0").is_none(), "{doc}");
     assert!(server.healthy());
 }
@@ -387,13 +391,13 @@ fn an_ecosystem_that_is_off_answers_for_nothing() {
         200
     );
 
-    let (status, _) = server.get("/npm/widget", &admin);
+    let (status, _) = server.get("/npm/@acme%2fwidget", &admin);
     assert_eq!(status, 404);
     let (status, _) = server.req(
         "PUT",
-        "/npm/widget",
+        "/npm/@acme%2fwidget",
         &admin,
-        Some(publish_doc("widget", "1.0.0", b"bytes")),
+        Some(publish_doc("@acme/widget", "1.0.0", b"bytes")),
     );
     assert_eq!(
         status, 404,
@@ -433,13 +437,13 @@ fn an_ecosystem_that_is_off_answers_for_nothing() {
     assert_eq!(body["registry_base"], server.base, "{body}");
 
     common::enable(&server, &admin, "npm");
-    let (status, _) = server.get("/npm/widget", &admin);
+    let (status, _) = server.get("/npm/@acme%2fwidget", &admin);
     assert_eq!(status, 404, "enabled, but this package really is absent");
     let (status, _) = server.req(
         "PUT",
-        "/npm/widget",
+        "/npm/@acme%2fwidget",
         &admin,
-        Some(publish_doc("widget", "1.0.0", b"bytes")),
+        Some(publish_doc("@acme/widget", "1.0.0", b"bytes")),
     );
     assert_eq!(status, 201);
     assert!(server.healthy(), "the server stopped serving");
@@ -468,7 +472,7 @@ fn hostile_publishes_are_refused_and_the_server_keeps_serving() {
 
     let (status, body) = server.req(
         "PUT",
-        "/npm/widget",
+        "/npm/@acme%2fwidget",
         &admin,
         Some(publish_doc("something-else", "1.0.0", b"bytes")),
     );
@@ -481,17 +485,27 @@ fn hostile_publishes_are_refused_and_the_server_keeps_serving() {
         "{body}"
     );
 
-    let mut lying = publish_doc("widget", "1.0.0", b"bytes");
+    let mut lying = publish_doc("@acme/widget", "1.0.0", b"bytes");
     lying["_attachments"]["widget-1.0.0.tgz"]["length"] = serde_json::json!(999_999);
-    assert_eq!(server.req("PUT", "/npm/widget", &admin, Some(lying)).0, 400);
+    assert_eq!(
+        server
+            .req("PUT", "/npm/@acme%2fwidget", &admin, Some(lying))
+            .0,
+        400
+    );
 
-    let mut two = publish_doc("widget", "1.0.0", b"bytes");
-    two["versions"]["2.0.0"] = serde_json::json!({ "name": "widget", "version": "2.0.0" });
-    assert_eq!(server.req("PUT", "/npm/widget", &admin, Some(two)).0, 400);
+    let mut two = publish_doc("@acme/widget", "1.0.0", b"bytes");
+    two["versions"]["2.0.0"] = serde_json::json!({ "name": "@acme/widget", "version": "2.0.0" });
+    assert_eq!(
+        server
+            .req("PUT", "/npm/@acme%2fwidget", &admin, Some(two))
+            .0,
+        400
+    );
 
     let (status, _) = server.req(
         "PUT",
-        "/npm/widget",
+        "/npm/@acme%2fwidget",
         &admin,
         Some(serde_json::json!("this is a string, not a publish")),
     );
@@ -499,7 +513,7 @@ fn hostile_publishes_are_refused_and_the_server_keeps_serving() {
 
     let r = server.raw(
         "PUT",
-        "/npm/widget",
+        "/npm/@acme%2fwidget",
         &[
             ("Authorization", &format!("Bearer {admin}")),
             ("Content-Type", "application/json"),
@@ -518,9 +532,9 @@ fn hostile_publishes_are_refused_and_the_server_keeps_serving() {
 
     let (status, _) = server.req(
         "PUT",
-        "/npm/widget",
+        "/npm/@acme%2fwidget",
         &admin,
-        Some(publish_doc("widget", "1.0.0", b"real bytes")),
+        Some(publish_doc("@acme/widget", "1.0.0", b"real bytes")),
     );
     assert_eq!(status, 201);
 }
@@ -535,9 +549,9 @@ fn the_npm_door_refuses_the_wrong_url_and_names_nothing_it_did_not_publish() {
 
     let (status, body) = server.req(
         "PUT",
-        "/npm/widget/-/widget-1.0.0.tgz",
+        "/npm/@acme%2fwidget/-/widget-1.0.0.tgz",
         &admin,
-        Some(publish_doc("widget", "1.0.0", b"bytes")),
+        Some(publish_doc("@acme/widget", "1.0.0", b"bytes")),
     );
     assert_eq!(status, 400, "{body}");
 
@@ -545,11 +559,14 @@ fn the_npm_door_refuses_the_wrong_url_and_names_nothing_it_did_not_publish() {
     assert_eq!(status, 404);
     server.req(
         "PUT",
-        "/npm/widget",
+        "/npm/@acme%2fwidget",
         &admin,
-        Some(publish_doc("widget", "1.0.0", b"bytes")),
+        Some(publish_doc("@acme/widget", "1.0.0", b"bytes")),
     );
-    let (status, _) = get_bytes(&server.url("/npm/widget/-/widget-9.9.9.tgz"), &admin);
+    let (status, _) = get_bytes(
+        &server.url("/npm/@acme%2fwidget/-/widget-9.9.9.tgz"),
+        &admin,
+    );
     assert_eq!(status, 404, "a tarball name nothing published was served");
     assert!(server.healthy());
 }
@@ -566,12 +583,12 @@ fn a_dist_tag_for_another_version_is_not_applied() {
     let server = spawn(&bucket.base_url, "npm-tags");
     let admin = server.bootstrap("acme");
 
-    let mut doc = publish_doc("widget", "1.0.0", b"bytes");
+    let mut doc = publish_doc("@acme/widget", "1.0.0", b"bytes");
     doc["dist-tags"] = serde_json::json!({ "latest": "1.0.0", "next": "2.0.0-beta" });
-    let (status, body) = server.req("PUT", "/npm/widget", &admin, Some(doc));
+    let (status, body) = server.req("PUT", "/npm/@acme%2fwidget", &admin, Some(doc));
     assert_eq!(status, 201, "{body}");
 
-    let (_, doc) = server.get("/npm/widget", &admin);
+    let (_, doc) = server.get("/npm/@acme%2fwidget", &admin);
     assert_eq!(doc["dist-tags"]["latest"], "1.0.0");
     assert!(
         doc["dist-tags"].get("next").is_none(),
@@ -598,12 +615,12 @@ fn the_collector_removes_orphaned_bytes_and_leaves_referenced_ones() {
     let admin = server.bootstrap("acme");
 
     for (name, body) in [
-        ("doomed", &b"bytes that will be orphaned"[..]),
-        ("kept", b"bytes still referenced"),
+        ("@acme/doomed", &b"bytes that will be orphaned"[..]),
+        ("@acme/kept", b"bytes still referenced"),
     ] {
         let (status, b) = server.req(
             "PUT",
-            &format!("/npm/{name}"),
+            &format!("/npm/{}", name.replace('/', "%2f")),
             &admin,
             Some(publish_doc(name, "1.0.0", body)),
         );
@@ -623,7 +640,7 @@ fn the_collector_removes_orphaned_bytes_and_leaves_referenced_ones() {
         .as_array()
         .expect("a list")
         .iter()
-        .find(|p| p["name"] == "doomed")
+        .find(|p| p["name"] == "@acme/doomed")
         .and_then(|p| p["id"].as_str())
         .expect("the doomed package")
         .to_string();
@@ -656,7 +673,7 @@ fn the_collector_removes_orphaned_bytes_and_leaves_referenced_ones() {
     );
 
     // The one still referenced installs — not merely that a row survived.
-    let (_, doc) = server.get("/npm/kept", &admin);
+    let (_, doc) = server.get("/npm/@acme%2fkept", &admin);
     let url = doc["versions"]["1.0.0"]["dist"]["tarball"]
         .as_str()
         .expect("a tarball url");
@@ -684,9 +701,9 @@ fn the_management_api_shows_a_package_and_refuses_what_it_should() {
 
     let (status, body) = server.req(
         "PUT",
-        "/npm/widget",
+        "/npm/@acme%2fwidget",
         &publisher,
-        Some(publish_doc("widget", "1.0.0", b"bytes")),
+        Some(publish_doc("@acme/widget", "1.0.0", b"bytes")),
     );
     assert_eq!(status, 201, "{body}");
     let (_, listed) = server.get("/api/v1/packages", &admin);
@@ -697,7 +714,7 @@ fn the_management_api_shows_a_package_and_refuses_what_it_should() {
 
     let (status, shown) = server.get(&format!("/api/v1/packages/{id}"), &admin);
     assert_eq!(status, 200, "{shown}");
-    assert_eq!(shown["name"], "widget");
+    assert_eq!(shown["name"], "@acme/widget");
     let v = &shown["versions"][0];
     assert_eq!(v["version"], "1.0.0");
     assert_eq!(v["license"], "MIT");
@@ -862,12 +879,12 @@ fn the_body_limit_carries_base64s_expansion() {
     let tarball = vec![7u8; 3 * 1024 * 1024];
     let (status, body) = server.req(
         "PUT",
-        "/npm/big",
+        "/npm/@acme%2fbig",
         &admin,
-        Some(publish_doc("big", "1.0.0", &tarball)),
+        Some(publish_doc("@acme/big", "1.0.0", &tarball)),
     );
     assert_eq!(status, 201, "{body}");
-    let (_, doc) = server.get("/npm/big", &admin);
+    let (_, doc) = server.get("/npm/@acme%2fbig", &admin);
     let (_, bytes) = get_bytes(
         doc["versions"]["1.0.0"]["dist"]["tarball"]
             .as_str()
@@ -982,7 +999,7 @@ fn npm_login_whoami_ping_and_logout_speak_npms_own_endpoints() {
     assert_eq!(server.get("/npm/-/whoami", &rita).0, 401);
     let r = server.raw(
         "DELETE",
-        "/npm/widget",
+        "/npm/@acme%2fwidget",
         &[("Authorization", &format!("Bearer {npm_admin}"))],
         None,
     );
@@ -1040,4 +1057,371 @@ fn behind_a_proxy_the_urls_handed_out_are_the_public_ones() {
             "{field}: {config}"
         );
     }
+}
+
+/// Publish `name@version` as `token`, answering the status and body.
+fn publish(
+    server: &skein_testkit::Server,
+    token: &str,
+    name: &str,
+    version: &str,
+) -> (u16, serde_json::Value) {
+    server.req(
+        "PUT",
+        &format!("/npm/{}", name.replace('/', "%2f")),
+        token,
+        Some(publish_doc(
+            name,
+            version,
+            format!("{name} {version}").as_bytes(),
+        )),
+    )
+}
+
+/// npm packages are published under the organization's own scopes, and
+/// nowhere else.
+///
+/// The dependency-confusion fix. Any name used to be accepted — unscoped,
+/// or under anybody's scope — while the `.npmrc` the docs and the UI hand
+/// out routes only `@acme` to Skein. So `npm install plain-name` of an
+/// internal package went to public npmjs, where anybody can own that
+/// name, and a build installed a stranger's bytes believing them ours.
+/// Now a publish outside the organization's scopes is refused in words
+/// npm prints, before anything is stored; an admin adds a scope and the
+/// same publish goes through; a scope that holds packages cannot be
+/// removed from under them. Every refusal ends with the server serving.
+#[test]
+fn npm_publishing_is_limited_to_the_organizations_scopes() {
+    let bucket = Minio::shared().bucket("npm-e2e");
+    let server = spawn(&bucket.base_url, "npm-scopes");
+    let admin = server.bootstrap("acme");
+    let (_, ci) = server.person(&admin, "ci", "publisher", &["package:write"]);
+    let (_, rita) = server.person(&admin, "rita", "reader", &["org:read"]);
+
+    // A new organization has exactly its own scope.
+    let (status, scopes) = server.get("/api/v1/npm/scopes", &rita);
+    assert_eq!(status, 200, "{scopes}");
+    assert_eq!(
+        scopes,
+        serde_json::json!({ "scopes": [{ "scope": "@acme", "packages": 0 }] })
+    );
+
+    // Unscoped, and under somebody else's scope: refused, with the
+    // sentence npm prints, and nothing written.
+    let (status, out) = publish(&server, &ci, "plain-name", "1.0.0");
+    assert_eq!(status, 403, "{out}");
+    assert_eq!(
+        out["error"],
+        "npm packages here are published under this organization's scopes (@acme); \
+         \"plain-name\" has no scope — publish it as @acme/plain-name"
+    );
+    let (status, out) = publish(&server, &ci, "@zzz/thing", "1.0.0");
+    assert_eq!(status, 403, "{out}");
+    assert_eq!(
+        out["error"],
+        "@zzz is not one of this organization's npm scopes (@acme) — an admin can add it \
+         under Admission policy"
+    );
+    let (_, listed) = server.get("/api/v1/packages", &admin);
+    assert_eq!(
+        listed["packages"],
+        serde_json::json!([]),
+        "a refused publish left a package behind"
+    );
+    assert!(server.healthy());
+
+    // The order of refusals holds: nobody → 401, a reader → the role.
+    let r = server.raw(
+        "PUT",
+        "/npm/plain-name",
+        &[("Content-Type", "application/json")],
+        Some(b"{}"),
+    );
+    assert_eq!(r.status, 401, "{}", r.text());
+    let (status, out) = publish(&server, &rita, "plain-name", "1.0.0");
+    assert_eq!(status, 403, "{out}");
+    assert!(
+        out["error"].as_str().unwrap().contains("rita is a reader"),
+        "{out}"
+    );
+
+    // Only an admin changes the list.
+    for (method, path, body) in [
+        (
+            "POST",
+            "/api/v1/npm/scopes",
+            Some(serde_json::json!({ "scope": "@zzz" })),
+        ),
+        ("DELETE", "/api/v1/npm/scopes?scope=@acme", None),
+    ] {
+        for who in [&rita, &ci] {
+            let (status, out) = server.req(method, path, who, body.clone());
+            assert_eq!(status, 403, "{method} {path}: {out}");
+            assert!(
+                out["error"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("administer this registry"),
+                "{out}"
+            );
+        }
+    }
+    assert!(server.healthy());
+
+    // An admin adds @zzz, and the very publish that was refused lands.
+    let add = |scope: &str| {
+        server.req(
+            "POST",
+            "/api/v1/npm/scopes",
+            &admin,
+            Some(serde_json::json!({ "scope": scope })),
+        )
+    };
+    let (status, out) = add("@zzz");
+    assert_eq!(status, 201, "{out}");
+    assert_eq!(out, serde_json::json!({ "scope": "@zzz", "packages": 0 }));
+    let (status, out) = add("@zzz");
+    assert_eq!(status, 200, "adding it again is not an error: {out}");
+    assert_eq!(out, serde_json::json!({ "scope": "@zzz", "packages": 0 }));
+    // Stored as npm writes a scope: an @, lowercased.
+    let (status, out) = add("  Yyy ");
+    assert_eq!(status, 201, "{out}");
+    assert_eq!(out["scope"], "@yyy");
+    for bad in [
+        "@",
+        "@.hidden",
+        "@_under",
+        "@a/b",
+        "@has space",
+        "@caf\u{e9}",
+        "",
+    ] {
+        let (status, out) = add(bad);
+        assert_eq!(status, 400, "{bad:?} was added: {out}");
+        assert!(
+            out["error"].as_str().is_some_and(|e| !e.is_empty()),
+            "{out}"
+        );
+    }
+    assert!(server.healthy());
+
+    let (status, out) = publish(&server, &ci, "@zzz/thing", "1.0.0");
+    assert_eq!(status, 201, "{out}");
+    let (status, out) = publish(&server, &ci, "@ZZZ/other", "1.0.0");
+    assert_eq!(status, 201, "a scope is matched as npm folds it: {out}");
+    let (status, doc) = server.get("/npm/@zzz%2fthing", &rita);
+    assert_eq!(status, 200, "{doc}");
+
+    // Every scope, in the parenthesis, sorted.
+    let (status, out) = publish(&server, &ci, "@other/x", "1.0.0");
+    assert_eq!(status, 403, "{out}");
+    assert_eq!(
+        out["error"],
+        "@other is not one of this organization's npm scopes (@acme, @yyy, @zzz) — an admin \
+         can add it under Admission policy"
+    );
+    let (status, scopes) = server.get("/api/v1/npm/scopes", &rita);
+    assert_eq!(status, 200, "{scopes}");
+    assert_eq!(
+        scopes,
+        serde_json::json!({ "scopes": [
+            { "scope": "@acme", "packages": 0 },
+            { "scope": "@yyy", "packages": 0 },
+            { "scope": "@zzz", "packages": 2 },
+        ] })
+    );
+    let (_, overview) = server.get("/api/v1/overview", &rita);
+    assert_eq!(
+        overview["npm_scopes"],
+        serde_json::json!(["@acme", "@yyy", "@zzz"]),
+        "{overview}"
+    );
+
+    // A scope holding packages stays; an empty one goes; a missing one
+    // is not found.
+    let remove = |scope: &str| {
+        server.req(
+            "DELETE",
+            &format!("/api/v1/npm/scopes?scope={scope}"),
+            &admin,
+            None,
+        )
+    };
+    let (status, out) = remove("@zzz");
+    assert_eq!(status, 409, "{out}");
+    assert_eq!(
+        out,
+        serde_json::json!({ "error": "@zzz holds 2 packages; delete them before removing the scope" })
+    );
+    let (status, out) = remove("@yyy");
+    assert_eq!(status, 204, "{out}");
+    let (status, out) = remove("@yyy");
+    assert_eq!(status, 404, "{out}");
+    assert!(out["error"].is_string(), "{out}");
+    let (status, _) = remove("@never-was");
+    assert_eq!(status, 404);
+    // …and a scope removed is a scope refused again.
+    let (status, out) = publish(&server, &ci, "@yyy/late", "1.0.0");
+    assert_eq!(status, 403, "{out}");
+    assert!(server.healthy());
+
+    // Once a scope's packages are gone, it can go too.
+    let (_, listed) = server.get("/api/v1/packages?q=@zzz", &admin);
+    for p in listed["packages"].as_array().unwrap() {
+        let id = p["id"].as_str().unwrap();
+        let (status, _) = server.req("DELETE", &format!("/api/v1/packages/{id}"), &admin, None);
+        assert_eq!(status, 204);
+    }
+    let (status, out) = remove("@zzz");
+    assert_eq!(status, 204, "{out}");
+
+    let (_, log) = server.get("/api/v1/audit", &admin);
+    let acts: Vec<(String, serde_json::Value)> = log["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| {
+            e["action"]
+                .as_str()
+                .is_some_and(|a| a.starts_with("policy.npm_scope"))
+        })
+        .map(|e| {
+            (
+                e["action"].as_str().unwrap().to_string(),
+                e["context"]["scope"].clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        acts,
+        [
+            (
+                "policy.npm_scope.remove".to_string(),
+                serde_json::json!("@zzz")
+            ),
+            (
+                "policy.npm_scope.remove".to_string(),
+                serde_json::json!("@yyy")
+            ),
+            (
+                "policy.npm_scope.add".to_string(),
+                serde_json::json!("@yyy")
+            ),
+            (
+                "policy.npm_scope.add".to_string(),
+                serde_json::json!("@zzz")
+            ),
+        ],
+        "one entry per change, newest first — the repeated add changed nothing"
+    );
+    assert!(server.healthy());
+}
+
+/// A package published before scopes existed, with no scope of its own,
+/// keeps installing and can no longer be published to: the rule is about
+/// every new version, and an old one is not taken away from anybody.
+#[test]
+fn an_unscoped_package_from_before_keeps_installing_and_takes_no_new_version() {
+    let bucket = Minio::shared().bucket("npm-e2e");
+    let server = spawn(&bucket.base_url, "npm-scopes-legacy");
+    let admin = server.bootstrap("acme");
+    let (status, out) = publish(&server, &admin, "@acme/legacy", "1.0.0");
+    assert_eq!(status, 201, "{out}");
+    // What an install upgraded from before scopes holds: the same
+    // package under a name with no scope. (Its tarball is `legacy-1.0.0.tgz`
+    // either way — a scoped tarball drops the scope.)
+    let mut pg = postgres::Client::connect(&server.db_url, postgres::NoTls).expect("connect");
+    pg.execute(
+        "UPDATE packages SET name = 'legacy', normalized_name = 'legacy' \
+         WHERE normalized_name = '@acme/legacy'",
+        &[],
+    )
+    .unwrap();
+
+    let (status, doc) = server.get("/npm/legacy", &admin);
+    assert_eq!(status, 200, "{doc}");
+    let url = doc["versions"]["1.0.0"]["dist"]["tarball"]
+        .as_str()
+        .expect("a tarball url")
+        .to_string();
+    assert_eq!(
+        get_bytes(&url, &admin),
+        (200, b"@acme/legacy 1.0.0".to_vec())
+    );
+
+    let (status, out) = publish(&server, &admin, "legacy", "1.0.1");
+    assert_eq!(status, 403, "{out}");
+    assert_eq!(
+        out["error"],
+        "npm packages here are published under this organization's scopes (@acme); \
+         \"legacy\" has no scope — publish it as @acme/legacy"
+    );
+    let (_, doc) = server.get("/npm/legacy", &admin);
+    assert!(doc["versions"]["1.0.1"].is_null(), "{doc}");
+    assert!(server.healthy());
+}
+
+/// Renaming the organization adds its new scope and keeps the old one.
+///
+/// The configuration snippets are written with the organization's name,
+/// so after a rename they route the new scope — and every package
+/// already published under the old one has to keep publishing and
+/// routing, or a rename silently strands them.
+#[test]
+fn renaming_the_organization_adds_its_new_scope_and_keeps_the_old() {
+    let bucket = Minio::shared().bucket("npm-e2e");
+    let server = spawn(&bucket.base_url, "npm-scopes-rename");
+    let admin = server.bootstrap("acme");
+    let (status, out) = publish(&server, &admin, "@acme/widget", "1.0.0");
+    assert_eq!(status, 201, "{out}");
+
+    let (status, out) = server.req(
+        "PUT",
+        "/api/v1/org",
+        &admin,
+        Some(serde_json::json!({ "name": "acme-corp" })),
+    );
+    assert_eq!(status, 200, "{out}");
+    let (_, scopes) = server.get("/api/v1/npm/scopes", &admin);
+    assert_eq!(
+        scopes,
+        serde_json::json!({ "scopes": [
+            { "scope": "@acme", "packages": 1 },
+            { "scope": "@acme-corp", "packages": 0 },
+        ] })
+    );
+    let (_, overview) = server.get("/api/v1/overview", &admin);
+    assert_eq!(
+        overview["npm_scopes"],
+        serde_json::json!(["@acme", "@acme-corp"])
+    );
+
+    let (status, out) = publish(&server, &admin, "@acme/widget", "1.1.0");
+    assert_eq!(status, 201, "the old scope stopped publishing: {out}");
+    let (status, out) = publish(&server, &admin, "@acme-corp/gadget", "1.0.0");
+    assert_eq!(status, 201, "{out}");
+    let (status, doc) = server.get("/npm/@acme%2fwidget", &admin);
+    assert_eq!(status, 200, "{doc}");
+    assert_eq!(doc["dist-tags"]["latest"], "1.1.0");
+    // The suggestion names the organization as it is now called.
+    let (status, out) = publish(&server, &admin, "plain", "1.0.0");
+    assert_eq!(status, 403, "{out}");
+    assert!(
+        out["error"]
+            .as_str()
+            .unwrap()
+            .ends_with("publish it as @acme-corp/plain"),
+        "{out}"
+    );
+    // Renaming back adds nothing new.
+    let (status, _) = server.req(
+        "PUT",
+        "/api/v1/org",
+        &admin,
+        Some(serde_json::json!({ "name": "acme" })),
+    );
+    assert_eq!(status, 200);
+    let (_, scopes) = server.get("/api/v1/npm/scopes", &admin);
+    assert_eq!(scopes["scopes"].as_array().map(|s| s.len()), Some(2));
+    assert!(server.healthy());
 }

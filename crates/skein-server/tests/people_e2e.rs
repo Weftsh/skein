@@ -236,9 +236,9 @@ fn a_token_is_narrowed_by_its_owners_role_on_its_next_request() {
         server
             .req(
                 "PUT",
-                "/npm/widget",
+                "/npm/@acme%2fwidget",
                 token,
-                Some(publish_doc("widget", v, b"bytes")),
+                Some(publish_doc("@acme/widget", v, b"bytes")),
             )
             .0
     };
@@ -259,7 +259,7 @@ fn a_token_is_narrowed_by_its_owners_role_on_its_next_request() {
         "a demoted publisher's token still publishes"
     );
     assert_eq!(
-        server.get("/npm/widget", &ci).0,
+        server.get("/npm/@acme%2fwidget", &ci).0,
         200,
         "but it still installs"
     );
@@ -269,12 +269,12 @@ fn a_token_is_narrowed_by_its_owners_role_on_its_next_request() {
 
     assert_eq!(set(serde_json::json!({ "disabled": true })).0, 200);
     assert_eq!(
-        server.get("/npm/widget", &ci).0,
+        server.get("/npm/@acme%2fwidget", &ci).0,
         401,
         "a disabled person's token works"
     );
     assert_eq!(set(serde_json::json!({ "disabled": false })).0, 200);
-    assert_eq!(server.get("/npm/widget", &ci).0, 200);
+    assert_eq!(server.get("/npm/@acme%2fwidget", &ci).0, 200);
 
     // Revoked by an admin: dead for good.
     let (_, tokens) = server.get(&format!("/api/v1/users/{ci_id}/tokens"), &admin);
@@ -286,7 +286,7 @@ fn a_token_is_narrowed_by_its_owners_role_on_its_next_request() {
             .0,
         204
     );
-    assert_eq!(server.get("/npm/widget", &ci).0, 401);
+    assert_eq!(server.get("/npm/@acme%2fwidget", &ci).0, 401);
     assert_eq!(
         server
             .req("DELETE", &format!("/api/v1/tokens/{tid}"), &admin, None)
@@ -524,9 +524,9 @@ fn the_admin_cli_creates_people_mints_tokens_and_gets_you_back_in() {
         server
             .req(
                 "PUT",
-                "/npm/widget",
+                "/npm/@acme%2fwidget",
                 &token,
-                Some(publish_doc("widget", "1.0.0", b"b"))
+                Some(publish_doc("@acme/widget", "1.0.0", b"b"))
             )
             .0,
         201
@@ -545,9 +545,9 @@ fn the_admin_cli_creates_people_mints_tokens_and_gets_you_back_in() {
         server
             .req(
                 "PUT",
-                "/npm/widget",
+                "/npm/@acme%2fwidget",
                 &token,
-                Some(publish_doc("widget", "2.0.0", b"b"))
+                Some(publish_doc("@acme/widget", "2.0.0", b"b"))
             )
             .0,
         403
@@ -627,9 +627,9 @@ fn readiness_needs_the_bucket_and_the_server_can_create_it() {
         server
             .req(
                 "PUT",
-                "/npm/widget",
+                "/npm/@acme%2fwidget",
                 &admin,
-                Some(publish_doc("widget", "1.0.0", b"b"))
+                Some(publish_doc("@acme/widget", "1.0.0", b"b"))
             )
             .0,
         201

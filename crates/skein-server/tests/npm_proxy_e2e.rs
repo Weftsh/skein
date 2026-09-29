@@ -327,8 +327,11 @@ fn a_refused_version_cannot_be_reached_by_its_url() {
 fn a_reserved_namespace_is_never_mentioned_to_the_upstream() {
     let bucket = Minio::shared().bucket("npm-proxy-e2e");
     let up = FakeRegistry::start();
+    // A partner's scope this organization claims without publishing
+    // under it. (Its own scope, `@acme`, is never fetched whether or not
+    // anybody reserves it — see the test below.)
     up.add(
-        "@acme/new-service",
+        "@partner/new-service",
         vec![Version::new("9.9.9", Some("MIT"), Some(&days_ago(400)))],
     );
     let server = spawn(&bucket.base_url, "registry-reserved", &up);
@@ -340,12 +343,12 @@ fn a_reserved_namespace_is_never_mentioned_to_the_upstream() {
         "POST",
         "/api/v1/policy/namespaces",
         &admin,
-        Some(serde_json::json!({ "ecosystem": "npm", "pattern": "@acme" })),
+        Some(serde_json::json!({ "ecosystem": "npm", "pattern": "@partner" })),
     );
     assert_eq!(status, 200, "{body}");
-    assert_eq!(body["reserved"][0], "@acme");
+    assert_eq!(body["reserved"][0], "@partner");
 
-    let (status, doc) = server.get("/npm/@acme%2fnew-service", &admin);
+    let (status, doc) = server.get("/npm/@partner%2fnew-service", &admin);
     assert_eq!(status, 404, "a reserved name was proxied: {doc}");
     assert!(
         up.calls().is_empty(),
@@ -353,26 +356,94 @@ fn a_reserved_namespace_is_never_mentioned_to_the_upstream() {
         up.calls()
     );
 
-    // A neighbouring name is not covered — `@acme` must not quietly
-    // reserve `@acmecorp`.
+    // A neighbouring name is not covered — `@partner` must not quietly
+    // reserve `@partnerco`.
     up.add(
-        "@acmecorp/thing",
+        "@partnerco/thing",
         vec![Version::new("1.0.0", Some("MIT"), Some(&days_ago(400)))],
     );
-    let (status, doc) = server.get("/npm/@acmecorp%2fthing", &admin);
+    let (status, doc) = server.get("/npm/@partnerco%2fthing", &admin);
     assert_eq!(status, 200, "a neighbouring scope was reserved too: {doc}");
 
     // Releasing it opens the name again, which is the whole reason
     // release is an admin verb.
     let (status, _) = server.req(
         "DELETE",
-        "/api/v1/policy/namespaces?ecosystem=npm&pattern=@acme",
+        "/api/v1/policy/namespaces?ecosystem=npm&pattern=@partner",
         &admin,
         None,
     );
     assert_eq!(status, 204);
-    let (status, doc) = server.get("/npm/@acme%2fnew-service", &admin);
+    let (status, doc) = server.get("/npm/@partner%2fnew-service", &admin);
     assert_eq!(status, 200, "releasing did not open the name: {doc}");
+    assert!(server.healthy());
+}
+
+/// A name under one of the organization's npm scopes is never fetched
+/// from the upstream — published or not, reserved or not, in audit mode
+/// as in block mode.
+///
+/// Publishing is limited to those scopes, so a name under one of them is
+/// ours whether or not anybody has published it yet; fetching it would
+/// install whoever registered it upstream first — dependency confusion —
+/// and asking at all tells the upstream which internal names exist. A
+/// reservation alone did not close that: in audit mode, the default, a
+/// reserved name was still fetched and served. Scopes are matched whole:
+/// `@acme` is not `@acme-corp` or `@acmecorp`, which are somebody else's.
+#[test]
+fn a_name_under_the_organizations_scopes_is_never_fetched() {
+    let bucket = Minio::shared().bucket("npm-proxy-e2e");
+    let up = FakeRegistry::start();
+    for name in [
+        "@acme/not-yet",
+        "@vendor/sdk",
+        "@acme-corp/tool",
+        "@acmecorp/tool",
+    ] {
+        up.add(
+            name,
+            vec![Version::new("1.0.0", Some("MIT"), Some(&days_ago(400)))],
+        );
+    }
+    let server = spawn(&bucket.base_url, "registry-scopes-never", &up);
+    let admin = server.bootstrap("acme");
+    enable_proxy(&server, &admin, "allow");
+    let b = server.url("/npm");
+
+    for mode in ["audit", "block"] {
+        set_policy(&server, &admin, mode, 0);
+        let (status, doc) = server.get("/npm/@acme%2fnot-yet", &admin);
+        assert_eq!(status, 404, "{mode}: our own scope was proxied: {doc}");
+        let (status, _) = get_bytes(&format!("{b}/@acme%2fnot-yet/-/not-yet-1.0.0.tgz"), &admin);
+        assert_eq!(status, 404, "{mode}: fetched through the tarball door");
+    }
+    assert!(
+        up.calls().is_empty(),
+        "we asked the upstream about a name under our own scope: {:?}",
+        up.calls()
+    );
+
+    // A scope an admin adds is ours from that moment.
+    set_policy(&server, &admin, "audit", 0);
+    let (status, doc) = server.get("/npm/@vendor%2fsdk", &admin);
+    assert_eq!(status, 200, "before it was ours: {doc}");
+    let asked = up.calls().len();
+    let (status, body) = server.req(
+        "POST",
+        "/api/v1/npm/scopes",
+        &admin,
+        Some(serde_json::json!({ "scope": "@vendor" })),
+    );
+    assert_eq!(status, 201, "{body}");
+    let (status, doc) = server.get("/npm/@vendor%2fsdk", &admin);
+    assert_eq!(status, 404, "a scope just added was still proxied: {doc}");
+    assert_eq!(up.calls().len(), asked, "{:?}", up.calls());
+
+    // Somebody else's scope, however alike its name, is fetched as usual.
+    for name in ["@acme-corp/tool", "@acmecorp/tool"] {
+        let (status, doc) = server.get(&format!("/npm/{}", name.replace('/', "%2f")), &admin);
+        assert_eq!(status, 200, "{name} was taken for ours: {doc}");
+    }
     assert!(server.healthy());
 }
 
@@ -1192,14 +1263,14 @@ fn the_tarball_door_honours_reservations_and_reports_an_outage() {
         "POST",
         "/api/v1/policy/namespaces",
         &admin,
-        Some(serde_json::json!({ "ecosystem": "npm", "pattern": "@acme" })),
+        Some(serde_json::json!({ "ecosystem": "npm", "pattern": "@partner" })),
     );
     assert_eq!(status, 200, "{body}");
 
     // Straight at the tarball, the way a lockfile resolves.
     let before = up.calls().len();
     let (status, _) = get_bytes(
-        &format!("{b}/@acme%2fnew-service/-/new-service-1.0.0.tgz"),
+        &format!("{b}/@partner%2fnew-service/-/new-service-1.0.0.tgz"),
         &admin,
     );
     assert_eq!(
@@ -1356,7 +1427,7 @@ fn an_allow_list_admits_what_it_lists_and_audit_mode_serves_what_it_records() {
 fn a_name_cached_from_upstream_cannot_be_published_over() {
     let bucket = Minio::shared().bucket("npm-proxy-e2e");
     let up = FakeRegistry::start();
-    up.add("lodash", lodash());
+    up.add("@vendor/sdk", lodash());
     let server = spawn(&bucket.base_url, "registry-publish-over-proxied", &up);
     let admin = server.bootstrap("acme");
     enable_proxy(&server, &admin, "block");
@@ -1365,22 +1436,41 @@ fn a_name_cached_from_upstream_cannot_be_published_over() {
     // Cache it. The packument alone does not make the name proxied —
     // no artifact of ours exists yet — so this follows through to a
     // tarball, which is the fetch that writes the row.
-    let (status, doc) = server.get("/npm/lodash", &admin);
+    let (status, doc) = server.get("/npm/@vendor%2fsdk", &admin);
     assert_eq!(status, 200, "{doc}");
     let b = server.url("/npm");
-    let (status, _) = get_bytes(&format!("{b}/lodash/-/lodash-1.0.0.tgz"), &admin);
+    let (status, _) = get_bytes(&format!("{b}/@vendor%2fsdk/-/sdk-1.0.0.tgz"), &admin);
     assert_eq!(status, 200, "the upstream tarball did not cache");
+
+    // The scope becomes the organization's afterwards — the only way a
+    // name under one of its scopes can already be somebody else's here.
+    let (status, body) = server.req(
+        "POST",
+        "/api/v1/npm/scopes",
+        &admin,
+        Some(serde_json::json!({ "scope": "@vendor" })),
+    );
+    assert_eq!(status, 201, "{body}");
+    let (_, scopes) = server.get("/api/v1/npm/scopes", &admin);
+    assert!(
+        scopes["scopes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["scope"] == "@vendor" && s["packages"] == 0),
+        "a cached package counted as one this organization publishes: {scopes}"
+    );
 
     let (status, body) = server.req(
         "PUT",
-        "/npm/lodash",
+        "/npm/@vendor%2fsdk",
         &admin,
-        Some(publish_doc("lodash", "9.9.9", b"our own bytes")),
+        Some(publish_doc("@vendor/sdk", "9.9.9", b"our own bytes")),
     );
     assert_eq!(status, 409, "a publish landed on a proxied name: {body}");
 
-    // And the upstream's versions are untouched by the attempt.
-    let (status, doc) = server.get("/npm/lodash", &admin);
+    // And the cached versions are untouched by the attempt.
+    let (status, doc) = server.get("/npm/@vendor%2fsdk", &admin);
     assert_eq!(status, 200, "{doc}");
     assert!(
         doc["versions"]["9.9.9"].is_null(),

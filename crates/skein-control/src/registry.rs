@@ -73,8 +73,25 @@ pub fn the_org(db: &ControlDb) -> Result<Option<Org>, String> {
         }))
 }
 
-/// Create the organization. Refused if one already exists: an install
-/// serves one, and the database enforces it.
+/// The npm scope an organization's name makes: `@acme` for `acme`. A
+/// valid name is always a valid scope — lowercase letters, digits and
+/// dashes are all npm allows and more.
+pub fn own_npm_scope(name: &str) -> String {
+    format!("@{name}")
+}
+
+const ADD_SCOPE: &str = "INSERT INTO org_npm_scopes (org_id, scope, created_at) \
+                         VALUES ($1, $2, $3) ON CONFLICT DO NOTHING";
+
+/// Create the organization, with its own name as its first npm scope.
+/// Refused if one already exists: an install serves one, and the
+/// database enforces it.
+///
+/// The scope comes with the organization, in the same transaction,
+/// because npm publishing is held to the organization's scopes (see
+/// `packages::npm_scopes`) and the configuration every client is handed
+/// routes `@<org>` here: an organization born without it could publish
+/// nothing.
 pub fn create_org(db: &ControlDb, name: &str) -> Result<Org, String> {
     if !valid_name(name) {
         return Err(format!(
@@ -87,11 +104,16 @@ pub fn create_org(db: &ControlDb, name: &str) -> Result<Org, String> {
         name: name.to_string(),
         created_at: now_ms(),
     };
+    let scope = own_npm_scope(name);
     db.lock()
-        .execute(
-            "INSERT INTO orgs (id, name, created_at) VALUES ($1, $2, $3)",
-            &[&org.id, &org.name, &org.created_at],
-        )
+        .transaction(|tx| {
+            tx.execute(
+                "INSERT INTO orgs (id, name, created_at) VALUES ($1, $2, $3)",
+                &[&org.id, &org.name, &org.created_at],
+            )?;
+            tx.execute(ADD_SCOPE, &[&org.id, &scope, &org.created_at])?;
+            Ok(())
+        })
         .map_err(|e| {
             if is_unique_violation(&e) {
                 "this install already serves an organization".to_string()
@@ -103,17 +125,28 @@ pub fn create_org(db: &ControlDb, name: &str) -> Result<Org, String> {
 }
 
 /// Rename the organization. The id — and so every stored key — stays.
-pub fn rename_org(db: &ControlDb, org_id: &str, name: &str) -> Result<(), String> {
+///
+/// The new name's npm scope is **added**, and the old one kept. Every
+/// snippet Skein hands out is written with the organization's name, so
+/// after a rename new clients route the new scope; every package already
+/// published under the old one has to keep publishing and routing, or a
+/// rename would strand them. Returns the scope the new name makes.
+pub fn rename_org(db: &ControlDb, org_id: &str, name: &str) -> Result<String, String> {
     if !valid_name(name) {
         return Err(format!(
             "invalid organization name {name:?}: lowercase letters, digits and dashes, \
              at most 64 characters"
         ));
     }
+    let scope = own_npm_scope(name);
     db.lock()
-        .execute("UPDATE orgs SET name = $2 WHERE id = $1", &[&org_id, &name])
-        .map(|_| ())
-        .map_err(|e| format!("rename organization: {e}"))
+        .transaction(|tx| {
+            tx.execute("UPDATE orgs SET name = $2 WHERE id = $1", &[&org_id, &name])?;
+            tx.execute(ADD_SCOPE, &[&org_id, &scope, &now_ms()])?;
+            Ok(())
+        })
+        .map_err(|e| format!("rename organization: {e}"))?;
+    Ok(scope)
 }
 
 /// A round trip to the database, for `readyz`.
@@ -172,14 +205,31 @@ mod tests {
         let err = create_org(&db, "other").unwrap_err();
         assert!(err.contains("already serves"), "{err}");
         assert_eq!(the_org(&db).unwrap().unwrap().id, org.id);
-        rename_org(&db, &org.id, "acme-corp").unwrap();
+        assert_eq!(
+            crate::packages::npm_scopes(&db, &org.id).unwrap(),
+            ["@acme"],
+            "an organization is created with its own npm scope"
+        );
+        assert_eq!(rename_org(&db, &org.id, "acme-corp").unwrap(), "@acme-corp");
         let again = the_org(&db).unwrap().unwrap();
         assert_eq!(
             (again.id.as_str(), again.name.as_str()),
             (org.id.as_str(), "acme-corp")
         );
+        assert_eq!(
+            crate::packages::npm_scopes(&db, &org.id).unwrap(),
+            ["@acme", "@acme-corp"],
+            "a rename adds the new name's scope and keeps the old"
+        );
+        rename_org(&db, &org.id, "acme").unwrap();
+        assert_eq!(crate::packages::npm_scopes(&db, &org.id).unwrap().len(), 2);
         assert!(create_org(&db, "Bad Name").is_err());
         assert!(rename_org(&db, &again.id, "Bad Name").is_err());
+        assert_eq!(
+            crate::packages::npm_scopes(&db, &org.id).unwrap().len(),
+            2,
+            "a refused rename added a scope"
+        );
         ping(&db).unwrap();
     }
 }

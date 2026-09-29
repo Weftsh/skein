@@ -1705,6 +1705,11 @@ pub struct AdmissionPolicy {
     /// Normalised name prefixes this organization has claimed. Never
     /// proxied, published or not.
     pub reserved: Vec<String>,
+    /// For npm, the organization's scopes ([`npm_scopes`]); empty for
+    /// every other ecosystem. A name under one is never proxied either —
+    /// in audit mode as in block mode, which is where it differs from a
+    /// reservation.
+    pub npm_scopes: Vec<String>,
 }
 
 impl AdmissionPolicy {
@@ -1752,12 +1757,25 @@ pub fn admission_policy(
         .iter()
         .map(|r| r.get("pattern"))
         .collect();
+    let npm_scopes = match eco {
+        Ecosystem::Npm => guard
+            .query(
+                "SELECT scope FROM org_npm_scopes WHERE org_id = $1 ORDER BY scope",
+                &[&org_id],
+            )
+            .map_err(|e| format!("npm scopes: {e}"))?
+            .iter()
+            .map(|r| r.get("scope"))
+            .collect(),
+        _ => Vec::new(),
+    };
     Ok(AdmissionPolicy {
         mode: org.get("registry_policy_mode"),
         cooldown_days: i64::from(org.get::<_, i32>("registry_cooldown_days")),
         license_mode: org.get("license_mode"),
         license_rules: rules,
         reserved,
+        npm_scopes,
     })
 }
 
@@ -1927,6 +1945,179 @@ pub fn release_namespace(
         )
         .map(|n| n > 0)
         .map_err(|e| format!("release namespace: {e}"))
+}
+
+// ---------------------------------------------------------- npm scopes
+
+/// The longest scope, `@` included: npm's limit on a whole name.
+pub const MAX_SCOPE: usize = MAX_NAME;
+
+/// A scope as it is stored and compared — `@` and lowercase — or a
+/// refusal naming what is wrong.
+///
+/// npm's rules for a scope: letters, digits, `-`, `.` and `_`, not
+/// starting with `.` or `_`. The `@` is optional on the way in, because
+/// people type it both ways, and a scope is folded to lowercase because
+/// npm does: `@ACME/x` is `@acme/x` to every client.
+pub fn normalize_npm_scope(scope: &str) -> Result<String, String> {
+    let raw = scope.trim();
+    let bare = raw.strip_prefix('@').unwrap_or(raw).to_ascii_lowercase();
+    let refuse = |why: &str| {
+        Err(format!(
+            "{raw:?} is not an npm scope: {why} — a scope is @ then letters, digits, '-', '.' \
+             and '_', like @acme"
+        ))
+    };
+    if bare.is_empty() {
+        return refuse("it has no name");
+    }
+    if bare.starts_with('.') || bare.starts_with('_') {
+        return refuse("it starts with '.' or '_'");
+    }
+    if !bare
+        .bytes()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'-' | b'.' | b'_'))
+    {
+        return refuse("it has a character npm does not allow in one");
+    }
+    if bare.len() + 1 > MAX_SCOPE {
+        return refuse(&format!("it is longer than {MAX_SCOPE} characters"));
+    }
+    Ok(format!("@{bare}"))
+}
+
+/// The scope of an npm name, `@acme` of `@acme/widget`, or `None` for a
+/// name with no scope. Whole: `@acme` is never the scope of
+/// `@acme-corp/x`, which is somebody else's.
+pub fn npm_scope_of(name: &str) -> Option<&str> {
+    let name = name.trim();
+    if !name.starts_with('@') {
+        return None;
+    }
+    name.split_once('/').map(|(scope, _)| scope)
+}
+
+/// One of the organization's npm scopes, and how many packages it has
+/// published under it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct NpmScope {
+    pub scope: String,
+    /// Published here; a package cached from upstream is not one of ours
+    /// and does not hold the scope.
+    pub packages: i64,
+}
+
+/// The organization's npm scopes, sorted.
+pub fn npm_scopes(db: &ControlDb, org_id: &str) -> Result<Vec<String>, String> {
+    Ok(db
+        .lock()
+        .query(
+            "SELECT scope FROM org_npm_scopes WHERE org_id = $1 ORDER BY scope",
+            &[&org_id],
+        )
+        .map_err(|e| format!("npm scopes: {e}"))?
+        .iter()
+        .map(|r| r.get("scope"))
+        .collect())
+}
+
+/// Local npm packages under `scope`. Matched on the name's whole first
+/// segment rather than with `LIKE`, whose `_` would make `@a_c` count
+/// `@abc`'s packages.
+const COUNT_UNDER_SCOPE: &str = "SELECT COUNT(*) FROM packages p \
+     WHERE p.org_id = $1 AND p.ecosystem = 'npm' AND p.origin = 'local' \
+       AND split_part(p.normalized_name, '/', 1) = $2";
+
+/// The organization's npm scopes with the packages published under each.
+pub fn npm_scope_counts(db: &ControlDb, org_id: &str) -> Result<Vec<NpmScope>, String> {
+    Ok(db
+        .lock()
+        .query(
+            "SELECT s.scope, (SELECT COUNT(*) FROM packages p \
+                 WHERE p.org_id = s.org_id AND p.ecosystem = 'npm' AND p.origin = 'local' \
+                   AND split_part(p.normalized_name, '/', 1) = s.scope) AS packages \
+             FROM org_npm_scopes s WHERE s.org_id = $1 ORDER BY s.scope",
+            &[&org_id],
+        )
+        .map_err(|e| format!("npm scopes: {e}"))?
+        .iter()
+        .map(|r| NpmScope {
+            scope: r.get("scope"),
+            packages: r.get("packages"),
+        })
+        .collect())
+}
+
+/// Add a scope. `Ok((scope, true))` when it was added, `Ok((scope,
+/// false))` when it was already there — adding is idempotent.
+pub fn add_npm_scope(
+    db: &ControlDb,
+    org_id: &str,
+    scope: &str,
+    now: i64,
+) -> Result<(NpmScope, bool), String> {
+    let scope = normalize_npm_scope(scope)?;
+    let added = db
+        .lock()
+        .execute(
+            "INSERT INTO org_npm_scopes (org_id, scope, created_at) VALUES ($1, $2, $3) \
+             ON CONFLICT DO NOTHING",
+            &[&org_id, &scope, &now],
+        )
+        .map_err(|e| format!("add npm scope: {e}"))?
+        > 0;
+    let packages: i64 = db
+        .lock()
+        .query_one(COUNT_UNDER_SCOPE, &[&org_id, &scope])
+        .map_err(|e| format!("add npm scope: {e}"))?
+        .get(0);
+    Ok((NpmScope { scope, packages }, added))
+}
+
+/// What removing a scope came to.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ScopeRemoval {
+    Removed(String),
+    /// Not one of the organization's scopes.
+    Absent,
+    /// Packages published under it: removing the scope would leave them
+    /// unable to take a new version, and nothing but the admin who asked
+    /// would know why.
+    Holds(String, i64),
+}
+
+/// Remove a scope, unless it holds packages. The check and the delete
+/// are one transaction under a lock on the scope's row.
+pub fn remove_npm_scope(db: &ControlDb, org_id: &str, scope: &str) -> Result<ScopeRemoval, String> {
+    // Not refused for shape: a scope stored before any check existed has
+    // to stay removable.
+    let raw = scope.trim();
+    let scope = format!(
+        "@{}",
+        raw.strip_prefix('@').unwrap_or(raw).to_ascii_lowercase()
+    );
+    db.lock()
+        .transaction(|tx| {
+            let here = tx
+                .query_opt(
+                    "SELECT scope FROM org_npm_scopes WHERE org_id = $1 AND scope = $2 FOR UPDATE",
+                    &[&org_id, &scope],
+                )?
+                .is_some();
+            if !here {
+                return Ok(ScopeRemoval::Absent);
+            }
+            let n: i64 = tx.query_one(COUNT_UNDER_SCOPE, &[&org_id, &scope])?.get(0);
+            if n > 0 {
+                return Ok(ScopeRemoval::Holds(scope.clone(), n));
+            }
+            tx.execute(
+                "DELETE FROM org_npm_scopes WHERE org_id = $1 AND scope = $2",
+                &[&org_id, &scope],
+            )?;
+            Ok(ScopeRemoval::Removed(scope.clone()))
+        })
+        .map_err(|e| format!("remove npm scope: {}", crate::db::detail(&e)))
 }
 
 /// One finding, as the screen shows it.
@@ -3097,6 +3288,109 @@ mod tests {
 
         assert!(set_ecosystem_policy(&db, &org, Ecosystem::Npm, "sometimes", "block", 7).is_err());
         assert!(set_ecosystem_policy(&db, &org, Ecosystem::Npm, MODE_PRIVATE, "maybe", 7).is_err());
+    }
+
+    /// A scope is npm's shape, stored as npm folds it.
+    #[test]
+    fn an_npm_scope_is_at_and_lowercase_and_nothing_npm_would_refuse() {
+        for (typed, stored) in [
+            ("@acme", "@acme"),
+            ("acme", "@acme"),
+            ("  @ACME-Corp ", "@acme-corp"),
+            ("@a.b_c-9", "@a.b_c-9"),
+        ] {
+            assert_eq!(
+                normalize_npm_scope(typed).as_deref(),
+                Ok(stored),
+                "{typed:?}"
+            );
+        }
+        for bad in [
+            "",
+            "@",
+            "@.x",
+            "@_x",
+            "@a/b",
+            "@a b",
+            "@caf\u{e9}",
+            "@@a",
+            "@a!",
+            &format!("@{}", "a".repeat(MAX_SCOPE)),
+        ] {
+            let err = normalize_npm_scope(bad).expect_err(bad);
+            assert!(err.contains("not an npm scope"), "{bad:?}: {err}");
+        }
+        assert_eq!(npm_scope_of("@acme/widget"), Some("@acme"));
+        assert_eq!(npm_scope_of("widget"), None);
+        assert_eq!(npm_scope_of("@acme"), None, "a scope alone is not a name");
+    }
+
+    /// The list, its counts, adding and removing — against Postgres.
+    ///
+    /// A package cached from upstream is not one the organization
+    /// published and does not hold a scope; `_` in a scope is a
+    /// character, not a wildcard; and a scope holding packages cannot be
+    /// removed out from under them.
+    #[test]
+    fn a_scope_counts_what_was_published_under_it_and_is_kept_while_it_does() {
+        let (db, org) = world("pkg-npm-scopes");
+        assert_eq!(
+            npm_scopes(&db, &org).unwrap(),
+            ["@acme"],
+            "created with its own"
+        );
+        for (name, origin) in [
+            ("@acme/widget", ORIGIN_LOCAL),
+            ("@acme/gadget", ORIGIN_LOCAL),
+            ("@acme/cached", ORIGIN_PROXIED),
+            ("@abc/x", ORIGIN_LOCAL),
+            ("plain", ORIGIN_LOCAL),
+        ] {
+            ensure(&db, &org, Ecosystem::Npm, name, origin, 1).unwrap();
+        }
+        // Another ecosystem's package of a scope-like name is not an npm package.
+        ensure(&db, &org, Ecosystem::Oci, "@acme/image", ORIGIN_LOCAL, 1).unwrap();
+        let (added, fresh) = add_npm_scope(&db, &org, "A_C", 2).unwrap();
+        assert!(fresh);
+        assert_eq!(
+            added,
+            NpmScope {
+                scope: "@a_c".into(),
+                packages: 0
+            }
+        );
+        let (again, fresh) = add_npm_scope(&db, &org, "@a_c", 3).unwrap();
+        assert!(!fresh, "added twice");
+        assert_eq!(again.packages, 0);
+        assert!(add_npm_scope(&db, &org, "@no/slash", 3).is_err());
+        assert_eq!(
+            npm_scope_counts(&db, &org).unwrap(),
+            [
+                NpmScope {
+                    scope: "@a_c".into(),
+                    packages: 0
+                },
+                NpmScope {
+                    scope: "@acme".into(),
+                    packages: 2
+                },
+            ]
+        );
+        assert_eq!(
+            remove_npm_scope(&db, &org, "@acme").unwrap(),
+            ScopeRemoval::Holds("@acme".into(), 2)
+        );
+        assert_eq!(
+            remove_npm_scope(&db, &org, "A_C").unwrap(),
+            ScopeRemoval::Removed("@a_c".into())
+        );
+        assert_eq!(
+            remove_npm_scope(&db, &org, "@a_c").unwrap(),
+            ScopeRemoval::Absent
+        );
+        assert_eq!(npm_scopes(&db, &org).unwrap(), ["@acme"]);
+        // Another organization's scopes are not these.
+        assert!(npm_scopes(&db, &crate::ids::ulid()).unwrap().is_empty());
     }
 
     /// A licence rule is an SPDX id in SPDX's shape, stored with the

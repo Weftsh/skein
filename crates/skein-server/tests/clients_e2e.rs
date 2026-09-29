@@ -230,6 +230,29 @@ fn npm_publishes_views_and_installs_through_skein() {
         "npm did not show the reason: {refused}"
     );
 
+    // A name with no scope is refused, and npm shows the person which
+    // scope to publish it under. `--registry`, because the `.npmrc` routes
+    // only `@acme` here — which is exactly why an unscoped internal
+    // package is a dependency-confusion hole — and this must never reach
+    // npmjs.
+    let plain = scratch("npm-unscoped");
+    std::fs::write(
+        plain.join("package.json"),
+        r#"{ "name": "plain-name", "version": "1.0.0", "license": "MIT" }"#,
+    )
+    .unwrap();
+    let penv = npm_env(&server, &plain, &ci);
+    let penv: Vec<(&str, &str)> = penv.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let registry = format!("{}/npm/", server.base);
+    let unscoped = run_err(&plain, "npm", &["publish", "--registry", &registry], &penv);
+    assert!(unscoped.contains("403"), "{unscoped}");
+    assert!(
+        unscoped.contains("\"plain-name\" has no scope")
+            && unscoped.contains("publish it as @acme/plain-name"),
+        "npm did not show why an unscoped name was refused: {unscoped}"
+    );
+    let _ = std::fs::remove_dir_all(plain);
+
     // Without a token, npm is challenged rather than told the package is
     // missing.
     let anon = scratch("npm-anon");
