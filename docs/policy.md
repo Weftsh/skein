@@ -63,7 +63,7 @@ For any other name you want to keep — a partner's scope you depend on, a
 prefix in another ecosystem — reserve it:
 
 ```
-Admission policy → Names that are yours → @partner
+Admission policy → Other names that are yours → @partner
 ```
 
 Prefixes match on a **segment boundary**, never as a bare substring.

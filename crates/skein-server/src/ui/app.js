@@ -154,6 +154,10 @@ async function api(method, path, body) {
     // own answer, not a reason to render again.
     if (r.status === 401 && state.me && path !== "/session") {
       state.me = null;
+      state.overview = null;
+      state.license = null;
+      state.ended = true;
+      state.returnTo = location.hash;
       setTimeout(render);
     }
     throw new ApiError(r.status, (data && data.error) || `${r.status} ${r.statusText}`);
@@ -167,7 +171,14 @@ async function api(method, path, body) {
 // it had been installed — and the throw is marked as already reported,
 // so it does not then surface as an uncaught error in the console.
 async function act(fn, done) {
-  try { const out = await fn(); if (done) toast(done, "good"); return out; }
+  try {
+    const out = await fn();
+    // The failures before this success were earlier tries at it: "the
+    // current password is wrong" beside "Password changed" reads as both.
+    document.querySelectorAll("#toast .bad").forEach((el) => el.remove());
+    if (done) toast(done, "good");
+    return out;
+  }
   catch (e) { toast(e.message, "bad"); e.reported = true; throw e; }
 }
 window.addEventListener("unhandledrejection", (ev) => {
@@ -176,7 +187,7 @@ window.addEventListener("unhandledrejection", (ev) => {
 
 // ---------------------------------------------------------------- state
 
-const state = { me: null, overview: null, license: null };
+const state = { me: null, overview: null, license: null, ended: false, returnTo: null };
 const isAdmin = () => !!state.me && state.me.scopes.includes("org:admin");
 const canWrite = () => !!state.me && (isAdmin() || state.me.scopes.includes("package:write"));
 const base = () => (state.me && state.me.public_url) || location.origin;
@@ -216,13 +227,19 @@ async function render() {
     }
     if (location.hash === "#/login") { location.hash = "#/"; return; }
   }
-  if (!state.overview) {
-    try { state.overview = await api("GET", "/overview"); } catch { state.overview = null; }
-  }
+  // Read on every page, once: counts, the org's name and its npm scopes
+  // change under clients' feet, and a count above a longer table reads
+  // as wrong. Keep the last good one if this read fails.
+  try { state.overview = await api("GET", "/overview"); } catch { /* keep what we had */ }
+  // Signed out underneath us by that read: `api` has already scheduled
+  // the render that shows the sign-in form. Drawing this page for nobody
+  // threw on the sidebar's `state.me.org`.
+  if (!state.me) return;
   // Admins see what the licence says on every page. It never stops
   // anything, which is exactly why it has to be visible somewhere.
   if (isAdmin() && !state.license) {
     try { state.license = await api("GET", "/license"); } catch { state.license = null; }
+    if (!state.me) return;
   }
   const route = ROUTES.find(([re]) => re.test(location.hash || "#/"));
   const content = h("div", { class: "content" }, h("p", { class: "muted" }, "Loading…"));
@@ -233,7 +250,23 @@ async function render() {
   } catch (e) {
     content.replaceChildren(h("div", { class: "notice bad" }, e.message));
   }
+  markScrollers(content);
   document.title = `Skein · ${(state.overview && state.overview.org.name) || ""}`;
+}
+
+// A table too wide for the screen scrolls inside its card; `.scrolls`
+// makes that visible. Checked again whenever a table's box changes —
+// a phone turned sideways, a row added.
+const scrollWatch = new ResizeObserver((entries) => {
+  for (const { target: w } of entries) w.classList.toggle("scrolls", w.scrollWidth > w.clientWidth + 1);
+});
+function markScrollers(root) {
+  scrollWatch.disconnect();
+  for (const w of root.querySelectorAll(".table-wrap")) {
+    w.classList.toggle("scrolls", w.scrollWidth > w.clientWidth + 1);
+    scrollWatch.observe(w);
+    if (w.firstElementChild) scrollWatch.observe(w.firstElementChild);
+  }
 }
 
 function notFound() {
@@ -272,7 +305,8 @@ function sidebar() {
 
 async function logout() {
   await api("DELETE", "/session").catch(() => {});
-  state.me = null; state.overview = null;
+  state.me = null; state.overview = null; state.license = null;
+  state.ended = false; state.returnTo = null;
   go("#/login");
 }
 
@@ -281,6 +315,9 @@ function loginScreen() {
   const pass = h("input", { name: "password", type: "password", autocomplete: "current-password", required: true });
   const err = h("div", { class: "notice bad", hidden: true });
   const submit = h("button", { class: "btn primary", type: "submit" }, "Sign in");
+  // Signed out underneath them — an admin reset their password, or the
+  // session expired: say so, rather than drop them on this form mid-click.
+  const ended = state.ended && h("div", { class: "notice warn" }, "Your session has ended — sign in again to carry on where you were.");
   const form = h("form", {
     onsubmit: async (e) => {
       e.preventDefault();
@@ -288,11 +325,17 @@ function loginScreen() {
       try {
         state.me = await api("POST", "/session", { username: user.value, password: pass.value });
         state.overview = null;
-        location.hash = "#/"; render();
+        const to = state.returnTo && state.returnTo !== "#/login" ? state.returnTo : "#/";
+        state.ended = false; state.returnTo = null;
+        // `go` renders once: setting the hash renders through
+        // `hashchange`, and a second `render()` beside it fetched every
+        // page's data twice.
+        go(to);
       } catch (ex) { err.textContent = ex.message; err.hidden = false; }
       finally { submit.disabled = false; }
     },
   },
+    ended,
     h("label", { class: "field" }, "Username", user),
     h("label", { class: "field" }, "Password", pass),
     err, submit);
@@ -375,11 +418,23 @@ const INSTALL = {
 };
 
 async function packagePage(id) {
-  const p = await api("GET", `/packages/${id}`);
-  const latest = (p.tags.find((t) => t.tag === "latest") || {}).version || (p.versions[0] || {}).version;
+  let p;
+  try { p = await api("GET", `/packages/${id}`); }
+  catch (e) {
+    if (e.status !== 404) throw e;
+    return h("div", { class: "empty" }, h("strong", {}, "No such package"), "It may have been deleted. ", h("a", { href: "#/" }, "Back to packages"));
+  }
+  // What to install: the version `latest` names unless it is yanked, else
+  // the newest that is not. Recommending a yanked version contradicts the
+  // page's own "yanking hides it from resolution", and Cargo refuses it.
+  const live = p.versions.filter((v) => !v.yanked);
+  const tagged = (p.tags.find((t) => t.tag === "latest") || {}).version;
+  const latest = ((live.find((v) => v.version === tagged)) || live[0] || {}).version;
   const versionRows = p.versions.map((v) => h("tr", {},
     h("td", { class: "wrap" }, h("strong", { class: "mono" }, v.version),
-      v.yanked && h("span", { class: "badge warn", style: "margin-left:8px", title: v.yank_reason || "" }, "yanked")),
+      v.yanked && h("span", { class: "badge warn", style: "margin-left:8px" }, "yanked"),
+      // On the page, not in a tooltip: nobody on a phone can hover.
+      v.yanked && v.yank_reason && h("div", { class: "muted small" }, v.yank_reason)),
     h("td", {}, v.license ? h("span", { class: "mono" }, v.license) : h("span", { class: "badge warn", title: "The package declared no licence we could read" }, "unknown")),
     h("td", {}, v.published_by_username || h("span", { class: "muted" }, p.origin === "proxied" ? "upstream" : "—")),
     h("td", { class: "num" }, when(v.published_at)),
@@ -402,10 +457,14 @@ async function packagePage(id) {
     h("div", { class: "grid two" },
       h("div", { class: "card" }, h("h2", {}, "Install"),
         h("p", { class: "lede" }, "With a client already ", h("a", { href: "#/connect" }, "pointed at this registry"), "."),
-        latest && INSTALL[p.ecosystem] ? codeblock(INSTALL[p.ecosystem](p.name, latest)) : h("p", { class: "muted" }, "No versions.")),
+        latest && INSTALL[p.ecosystem] ? codeblock(INSTALL[p.ecosystem](p.name, latest))
+          : h("p", { class: "muted" }, p.versions.length ? "Every version is yanked." : "No versions.")),
       h("div", { class: "card" }, h("h2", {}, "Tags"),
         p.tags.length
-          ? h("table", {}, h("tbody", {}, p.tags.map((t) => h("tr", {}, h("td", { class: "mono" }, t.tag), h("td", { class: "mono" }, t.version)))))
+          ? h("table", {}, h("tbody", {}, p.tags.map((t) => h("tr", {}, h("td", { class: "mono" }, t.tag),
+            h("td", { class: "mono" }, t.version,
+              // The tag as stored, and that nothing resolves through it.
+              p.versions.some((v) => v.version === t.version && v.yanked) && h("span", { class: "badge warn", style: "margin-left:8px" }, "yanked"))))))
           : h("p", { class: "muted" }, "No tags."))),
     h("div", { class: "card" }, h("h2", {}, `Versions (${p.versions.length})`),
       h("p", { class: "lede" }, "A published version never changes. Yanking hides it from resolution without breaking a lockfile that names it."),
@@ -422,7 +481,9 @@ async function packagePage(id) {
       h("button", {
         class: "btn danger",
         onclick: async () => {
-          if (prompt(`Type the package name to delete it: ${p.name}`) !== p.name) return;
+          const typed = prompt(`Type the package name to delete it: ${p.name}`);
+          if (typed === null) return;
+          if (typed !== p.name) { toast("The name did not match, so nothing was deleted.", "bad"); return; }
           await act(() => api("DELETE", `/packages/${p.id}`), "Deleted");
           state.overview = null; go("#/");
         },
@@ -432,17 +493,26 @@ async function packagePage(id) {
 
 // ------------------------------------------------------------- connect
 
-function snippets(eco, token) {
+function snippets(eco, token, mode) {
   const b = base();
   const host = new URL(b).host;
   const org = (state.overview && state.overview.org.name) || "acme";
   const tok = token || "skein_…";
   switch (eco) {
-    case "npm": return [
-      ["~/.npmrc — your scope from here, everything else from npmjs", `@${org}:registry=${b}/npm/\n${b.replace(/^https?:/, "")}/npm/:_authToken=${tok}`],
-      ["Or everything through Skein (when npm is in proxy mode)", `registry=${b}/npm/\n${b.replace(/^https?:/, "")}/npm/:_authToken=${tok}`],
-      ["Then", "npm publish\nnpm install @" + org + "/<package>"],
-    ];
+    case "npm": {
+      // Every scope this organization publishes under, not only the one
+      // in its current name: after a rename, a snippet naming only the
+      // new scope sent every existing package's install to npmjs.
+      const scopes = (state.overview && state.overview.npm_scopes && state.overview.npm_scopes.length) ? state.overview.npm_scopes : [`@${org}`];
+      const auth = `${b.replace(/^https?:/, "")}/npm/:_authToken=${tok}`;
+      return [
+        [`~/.npmrc — ${scopes.length > 1 ? "your scopes" : "your scope"} from here, everything else from npmjs`, `${scopes.map((sc) => `${sc}:registry=${b}/npm/`).join("\n")}\n${auth}`],
+        // Only in proxy mode: in private mode every public dependency
+        // would answer 404 through Skein.
+        mode === "proxy" && ["Or everything through Skein, public packages included", `registry=${b}/npm/\n${auth}`],
+        ["Then", `npm publish\nnpm install ${scopes[0]}/<package>`],
+      ].filter(Boolean);
+    }
     case "maven": return [
       ["~/.m2/settings.xml", `<settings>\n  <servers>\n    <server>\n      <id>skein</id>\n      <username>skein</username>\n      <password>${tok}</password>\n    </server>\n  </servers>\n  <profiles>\n    <profile>\n      <id>skein</id>\n      <repositories>\n        <repository>\n          <id>skein</id>\n          <url>${b}/maven/</url>\n          <releases><enabled>true</enabled></releases>\n          <snapshots><enabled>false</enabled></snapshots>\n        </repository>\n      </repositories>\n    </profile>\n  </profiles>\n  <activeProfiles><activeProfile>skein</activeProfile></activeProfiles>\n</settings>`],
       ["Deploy", `mvn deploy -DaltDeploymentRepository=skein::${b}/maven/`],
@@ -482,19 +552,28 @@ async function connectPage() {
     panel.replaceChildren(...[
       off && h("div", { class: "notice warn" }, `${current.label} is switched off for this registry. `,
         isAdmin() ? h("a", { href: "#/policy" }, "Switch it on") : "Ask an admin to switch it on."),
-      ...(current ? snippets(current.ecosystem, token) : []).map(([t, code]) =>
+      ...(current ? snippets(current.ecosystem, token, current.mode) : []).map(([t, code]) =>
         h("div", {}, h("p", { class: "secondary", style: "margin:14px 0 6px" }, t), codeblock(code))),
     ].filter(Boolean));
   }
-  const readBtn = h("button", { class: "btn", onclick: () => mint(["package:read"]) }, "Mint an install token");
-  const writeBtn = canWrite() && h("button", { class: "btn primary", onclick: () => mint(["package:write"]) }, "Mint a publish token");
-  async function mint(scopes) {
-    const label = `${current ? current.ecosystem : "client"} from the UI`;
-    const t = await act(() => api("POST", "/me/tokens", { label, scopes }));
+  const readBtn = h("button", { class: "btn", onclick: () => mint("package:read", "install") }, "Mint an install token");
+  const writeBtn = canWrite() && h("button", { class: "btn primary", onclick: () => mint("package:write", "publish") }, "Mint a publish token");
+  // Every token minted on this visit stays on the page: each is shown
+  // once, and a second mint must not take the first one away.
+  const minted = [];
+  async function mint(scope, what) {
+    // Named for what it is and when, so the tokens list can tell them
+    // apart — not for whichever tab happened to be open.
+    const stamp = new Date().toISOString().slice(0, 19).replace("T", " ");
+    const label = `${what} token, Connect page, ${stamp} UTC`;
+    const t = await act(() => api("POST", "/me/tokens", { label, scopes: [scope] }));
     token = t.token;
+    minted.push({ label, token: t.token });
     tokenBox.replaceChildren(h("div", { class: "notice" },
-      h("p", { style: "margin:0 0 8px" }, h("strong", {}, "Your new token, shown once. "), "It is in the snippets below now; copy what you need before you leave this page."),
-      h("div", { class: "row" }, h("div", { class: "secret", style: "flex:1" }, token), copyButton(token))));
+      h("p", { style: "margin:0 0 8px" }, h("strong", {}, minted.length > 1 ? "Your new tokens, each shown once. " : "Your new token, shown once. "),
+        "The newest is in the snippets below; copy what you need before you leave this page."),
+      minted.map((m) => h("div", { style: "margin-top:8px" }, h("div", { class: "muted small" }, m.label),
+        h("div", { class: "row" }, h("div", { class: "secret", style: "flex:1" }, m.token), copyButton(m.token))))));
     draw();
   }
   draw();
@@ -515,21 +594,33 @@ function scopeBadges(scopes) {
   return scopes.map((s) => h("span", { class: `badge ${s === "org:admin" ? "warn" : s === "package:write" ? "good" : ""}`, style: "margin-right:4px" }, s));
 }
 
-function tokenTable(tokens, showOwner, onRevoke) {
+const day = (ms) => new Date(ms).toISOString().slice(0, 10);
+
+// `owners`, when given, maps a username to that person: a disabled
+// person's tokens are listed but do nothing, and a token keeps the scope
+// it was minted with while acting with its owner's role as it is now.
+function tokenTable(tokens, showOwner, onRevoke, owners) {
   if (!tokens.length) return h("div", { class: "empty" }, h("strong", {}, "No tokens"), "Mint one to point a client at this registry.");
+  const acts = (t) => {
+    const u = owners && owners[t.username];
+    if (!u) return null;
+    if (u.disabled) return h("div", {}, h("span", { class: "badge bad" }, "owner disabled — does not work"));
+    const beyond = u.role === "reader" && t.scopes.some((sc) => sc !== "package:read" && sc !== "org:read");
+    return beyond && h("div", { class: "muted small" }, `acts as a ${u.role} now`);
+  };
   return h("div", { class: "table-wrap" }, h("table", {},
-    h("thead", {}, h("tr", {}, h("th", {}, "Label"), showOwner && h("th", {}, "Owner"), h("th", {}, "Scopes"), h("th", { class: "num" }, "Created"), h("th", { class: "num" }, "Last used"), h("th", { class: "num" }, "Expires"), h("th", {}))),
+    h("thead", {}, h("tr", {}, h("th", {}, "Label"), showOwner && h("th", {}, "Owner"), h("th", {}, "Scopes"), h("th", { class: "num" }, "Created"), h("th", { class: "num hide-sm" }, "Last used"), h("th", { class: "num" }, "Expires"), h("th", {}))),
     h("tbody", {}, tokens.map((t) => h("tr", {},
       h("td", { class: "wrap" }, t.label),
       showOwner && h("td", {}, t.username),
-      h("td", { class: "wrap" }, scopeBadges(t.scopes)),
+      h("td", { class: "wrap" }, scopeBadges(t.scopes), acts(t)),
       h("td", { class: "num" }, when(t.created_at)),
-      h("td", { class: "num" }, when(t.last_used_at)),
+      h("td", { class: "num hide-sm" }, when(t.last_used_at)),
       h("td", { class: "num" }, t.expires_at ? new Date(t.expires_at).toISOString().slice(0, 10) : h("span", { class: "muted" }, "never")),
       h("td", { class: "num" }, h("button", {
         class: "btn small danger",
         onclick: async () => {
-          if (!confirm(`Revoke "${t.label}"? Anything using it stops working at once.`)) return;
+          if (!confirm(`Revoke "${t.label}" (${t.scopes.join(", ")}${showOwner ? `, ${t.username}'s` : ""}, created ${day(t.created_at)})? Anything using it stops working at once.`)) return;
           await act(() => api("DELETE", `/tokens/${t.id}`), "Revoked");
           onRevoke();
         },
@@ -547,7 +638,9 @@ async function tokensPage() {
   const scope = h("select", {},
     h("option", { value: "package:read" }, "package:read — install"),
     canWrite() && h("option", { value: "package:write" }, "package:write — install and publish"),
-    h("option", { value: "org:read" }, "org:read — install, and read settings"),
+    // Reading settings is an admin's; for anybody else org:read reads
+    // no more than package:read.
+    isAdmin() && h("option", { value: "org:read" }, "org:read — install, and read settings"),
     isAdmin() && h("option", { value: "org:admin" }, "org:admin — everything"));
   const days = h("select", {},
     h("option", { value: "" }, "Never"), h("option", { value: "30" }, "30 days"), h("option", { value: "90" }, "90 days"), h("option", { value: "365" }, "1 year"));
@@ -590,11 +683,50 @@ function passwordCard() {
       },
     },
       h("label", { class: "field" }, "Current", cur),
-      h("label", { class: "field" }, "New", h("span", { class: "hint" }, "At least 12 characters"), next),
+      h("label", { class: "field" }, "New", h("span", { class: "hint after" }, "At least 12 characters"), next),
       h("button", { class: "btn", type: "submit" }, "Change")));
 }
 
 // --------------------------------------------------------------- people
+
+// 24 characters from the browser's CSPRNG: 144 bits, which nobody chose
+// and nobody has to type twice.
+function generatePassword() {
+  const b = crypto.getRandomValues(new Uint8Array(18));
+  return btoa(String.fromCharCode(...b)).replace(/\+/g, "-").replace(/\//g, "_");
+}
+
+// A password field with a "Generate" beside it. A generated password is
+// shown, not masked: the admin is the one who has to pass it on.
+function passwordField(input) {
+  return h("button", { class: "btn", type: "button", onclick: () => { input.value = generatePassword(); input.type = "text"; input.focus(); } }, "Generate");
+}
+
+// Setting somebody's password, in the page rather than in `prompt()`,
+// which shows it in clear with no second look and nothing to copy.
+function setPasswordForm(where, u) {
+  const input = h("input", { type: "password", minlength: 12, required: true, autocomplete: "new-password", "aria-label": `New password for ${u.username}` });
+  where.replaceChildren(h("div", { class: "card" },
+    h("h2", {}, `A new password for ${u.username}`),
+    h("p", { class: "lede" }, "It signs them out everywhere. Skein does not send it to them: pass it on yourself."),
+    h("form", {
+      class: "inline set-password",
+      onsubmit: async (e) => {
+        e.preventDefault();
+        await act(() => api("PATCH", `/users/${u.id}`, { password: input.value }), "Password set");
+        const pw = input.value;
+        where.replaceChildren(h("div", { class: "notice" },
+          h("p", { style: "margin:0 0 8px" }, h("strong", {}, `${u.username}'s new password. `), "Copy it now to pass it on; it is not shown again."),
+          h("div", { class: "row" }, h("div", { class: "secret", style: "flex:1" }, pw), copyButton(pw))));
+      },
+    },
+      h("label", { class: "field" }, "Password", h("span", { class: "hint after" }, "At least 12 characters"), input),
+      passwordField(input),
+      h("button", { class: "btn primary", type: "submit" }, "Set password"),
+      h("button", { class: "btn link", type: "button", onclick: () => where.replaceChildren() }, "Cancel"))));
+  where.scrollIntoView({ block: "nearest" });
+  input.focus();
+}
 
 function shownOnce(where, who, token) {
   where.replaceChildren(h("div", { class: "notice" },
@@ -605,12 +737,17 @@ function shownOnce(where, who, token) {
 
 async function peoplePage() {
   const { users } = await api("GET", "/users");
+  const owners = Object.fromEntries(users.map((u) => [u.username, u]));
   const fresh = h("div", {});
+  // Set below once the token list exists; a token minted for somebody
+  // must appear in it at once, not on the next visit.
+  let reloadTokens = async () => {};
   const out = [pageHead("People", "Everybody who can reach this registry. There is no anonymous access."), fresh];
   if (isAdmin()) {
     const name = h("input", { required: true, placeholder: "ada", autocomplete: "off" });
     const role = h("select", {}, ["reader", "publisher", "admin"].map((r) => h("option", { value: r }, r)));
     const pw = h("input", { type: "password", placeholder: "leave empty for a service account", autocomplete: "new-password" });
+    const gen = passwordField(pw);
     out.push(h("div", { class: "card" }, h("h2", {}, "Add somebody"),
       h("p", { class: "lede" }, "A reader installs; a publisher also publishes and yanks; an admin changes settings and people. With no password it is a service account for CI: it holds tokens and cannot sign in."),
       h("form", {
@@ -624,21 +761,22 @@ async function peoplePage() {
         h("label", { class: "field" }, "Username", name),
         h("label", { class: "field", style: "flex:0 1 150px" }, "Role", role),
         h("label", { class: "field" }, "Password", pw),
+        gen,
         h("button", { class: "btn primary", type: "submit" }, "Add"))));
   }
   out.push(h("div", { class: "card" }, h("div", { class: "table-wrap" }, h("table", {},
-    h("thead", {}, h("tr", {}, h("th", {}, "Who"), h("th", {}, "Role"), h("th", {}, "Signs in"), h("th", { class: "num" }, "Since"), isAdmin() && h("th", {}))),
+    h("thead", {}, h("tr", {}, h("th", {}, "Who"), h("th", {}, "Role"), h("th", {}, "Signs in"), h("th", { class: "num hide-sm" }, "Since"), isAdmin() && h("th", {}))),
     h("tbody", {}, users.map((u) => h("tr", {},
       h("td", { class: "wrap" }, h("strong", {}, u.username), u.disabled && h("span", { class: "badge bad", style: "margin-left:8px" }, "disabled"), u.id === state.me.id && h("span", { class: "muted" }, " (you)")),
       h("td", {}, isAdmin() ? roleSelect(u) : u.role),
       h("td", {}, u.can_sign_in ? "yes" : h("span", { class: "muted" }, "service account")),
-      h("td", { class: "num" }, when(u.created_at)),
-      isAdmin() && h("td", { class: "num" }, h("div", { class: "actions" }, personActions(u, fresh))))))))));
+      h("td", { class: "num hide-sm" }, when(u.created_at)),
+      isAdmin() && h("td", { class: "num" }, h("div", { class: "actions" }, personActions(u, fresh, () => reloadTokens()))))))))));
   if (isAdmin()) {
     const { tokens } = await api("GET", "/tokens");
     const box = h("div", {});
-    const reload = async () => box.replaceChildren(tokenTable((await api("GET", "/tokens")).tokens, true, reload));
-    box.replaceChildren(tokenTable(tokens, true, reload));
+    reloadTokens = async () => { box.replaceChildren(tokenTable((await api("GET", "/tokens")).tokens, true, reloadTokens, owners)); markScrollers(box); };
+    box.replaceChildren(tokenTable(tokens, true, reloadTokens, owners));
     out.push(h("div", { class: "card" }, h("h2", {}, "Every live token"), h("p", { class: "lede" }, "Revoke anything you do not recognise."), box));
   }
   return out;
@@ -656,7 +794,7 @@ function roleSelect(u) {
   return s;
 }
 
-function personActions(u, fresh) {
+function personActions(u, fresh, reloadTokens) {
   return [
     !u.can_sign_in && !u.disabled && h("button", {
       class: "btn small",
@@ -666,16 +804,12 @@ function personActions(u, fresh) {
         if (!label) return;
         const t = await act(() => api("POST", `/users/${u.id}/tokens`, { label, scopes: [scope] }));
         shownOnce(fresh, u.username, t.token);
+        await reloadTokens();
       },
     }, "Mint token"),
     h("button", {
       class: "btn small",
-      onclick: async () => {
-        const pw = prompt(`New password for ${u.username} (at least 12 characters). Signs them out everywhere:`);
-        if (!pw) return;
-        await act(() => api("PATCH", `/users/${u.id}`, { password: pw }), "Password set");
-        render();
-      },
+      onclick: () => setPasswordForm(fresh, u),
     }, "Set password"),
     h("button", {
       class: "btn small",
@@ -684,7 +818,7 @@ function personActions(u, fresh) {
     h("button", {
       class: "btn small danger",
       onclick: async () => {
-        if (!confirm(`Remove ${u.username}? Their tokens stop working; what they published stays.`)) return;
+        if (!confirm(`Remove ${u.username}? Their tokens stop working at once. What they published stays, still credited to them.`)) return;
         await act(() => api("DELETE", `/users/${u.id}`), "Removed");
         render();
       },
@@ -695,7 +829,7 @@ function personActions(u, fresh) {
 // --------------------------------------------------------------- policy
 
 async function policyPage() {
-  const [{ ecosystems }, policy] = await Promise.all([api("GET", "/ecosystems"), api("GET", "/policy?ecosystem=npm")]);
+  const [{ ecosystems }, policy, { scopes }] = await Promise.all([api("GET", "/ecosystems"), api("GET", "/policy?ecosystem=npm"), api("GET", "/npm/scopes")]);
   const admin = isAdmin();
   const dis = !admin;
   const servedSet = new Set(served().map((e) => e.ecosystem));
@@ -705,15 +839,19 @@ async function policyPage() {
       h("option", { value: "off", selected: e.mode === "off" }, "Off"),
       h("option", { value: "private", selected: e.mode === "private" }, "Private"),
       e.ecosystem === "npm" && h("option", { value: "proxy", selected: e.mode === "proxy" }, "Private + proxy"));
-    const unknown = h("select", { disabled: dis, "aria-label": `${e.label} unknown licence` },
+    // Only npm's proxy reads it: the licence of a package published here
+    // is on record either way, and nothing else is fetched from upstream.
+    // Offering the choice elsewhere offered a switch wired to nothing.
+    const unknown = e.ecosystem === "npm" && h("select", { disabled: dis, "aria-label": `${e.label} unknown licence` },
       h("option", { value: "block", selected: e.license_unknown === "block" }, "Refuse"),
       h("option", { value: "allow", selected: e.license_unknown === "allow" }, "Admit"));
     const save = async () => {
-      await act(() => api("PUT", "/ecosystems", { ecosystem: e.ecosystem, mode: mode.value, license_unknown: unknown.value }), `${e.label} saved`);
+      await act(() => api("PUT", "/ecosystems", { ecosystem: e.ecosystem, mode: mode.value, license_unknown: unknown ? unknown.value : e.license_unknown }), `${e.label} saved`);
       state.overview = null;
     };
-    mode.addEventListener("change", save); unknown.addEventListener("change", save);
-    return h("tr", {}, h("td", {}, h("strong", {}, e.label)), h("td", {}, mode), h("td", {}, unknown));
+    mode.addEventListener("change", save); if (unknown) unknown.addEventListener("change", save);
+    return h("tr", {}, h("td", {}, h("strong", {}, e.label)), h("td", {}, mode),
+      h("td", {}, unknown || h("span", { class: "muted small" }, "not fetched from upstream")));
   });
 
   const pmode = h("select", { disabled: dis },
@@ -724,7 +862,13 @@ async function policyPage() {
     h("option", { value: "deny_list", selected: policy.license_mode === "deny_list" }, "Deny list — admit everything except what is denied"),
     h("option", { value: "allow_list", selected: policy.license_mode === "allow_list" }, "Allow list — admit only what is allowed"));
   const savePolicy = async () => {
-    await act(() => api("PUT", "/policy", { mode: pmode.value, cooldown_days: Number(cooldown.value), license_mode: lmode.value }), "Policy saved");
+    try {
+      await act(() => api("PUT", "/policy", { mode: pmode.value, cooldown_days: Number(cooldown.value), license_mode: lmode.value }), "Policy saved");
+    } catch {
+      // Refused: show what is in force, not what was refused.
+      pmode.value = policy.mode; cooldown.value = policy.cooldown_days; lmode.value = policy.license_mode;
+      return;
+    }
     render();
   };
 
@@ -738,7 +882,16 @@ async function policyPage() {
   const reserved = policy.reserved.map((p) => h("tr", {},
     h("td", { class: "mono" }, p),
     h("td", { class: "num" }, admin && h("button", { class: "btn small", onclick: async () => { await act(() => api("DELETE", `/policy/namespaces?ecosystem=npm&pattern=${encodeURIComponent(p)}`), "Released"); render(); } }, "Release"))));
-  const ns = h("input", { placeholder: `@${(state.overview && state.overview.org.name) || "acme"}`, required: true });
+  const ns = h("input", { placeholder: "@partner or internal-tool", required: true });
+
+  const scopeRows = scopes.map((sc) => h("tr", {},
+    h("td", { class: "mono" }, sc.scope),
+    h("td", { class: "muted" }, `${sc.packages} ${sc.packages === 1 ? "package" : "packages"}`),
+    h("td", { class: "num" }, admin && h("button", { class: "btn small", onclick: async () => {
+      await act(() => api("DELETE", `/npm/scopes?scope=${encodeURIComponent(sc.scope)}`), `${sc.scope} removed`);
+      state.overview = null; render();
+    } }, "Remove"))));
+  const newScope = h("input", { placeholder: "@platform", required: true, pattern: "@[a-z0-9][a-z0-9._\\-]*" });
 
   return [
     pageHead("Admission policy", admin ? "What may enter your builds from a public registry." : "What may enter your builds from a public registry. Only an admin can change it."),
@@ -754,14 +907,21 @@ async function policyPage() {
         h("label", { class: "field" }, "Hold new upstream releases for this many days", h("span", { class: "hint" }, "0 turns it off. Every compromised-maintainer release worth naming was withdrawn within days."), cooldown),
         h("label", { class: "field" }, "Licences", lmode),
         admin && h("div", {}, h("button", { class: "btn primary", onclick: savePolicy }, "Save rules")))),
+    h("div", { class: "card" }, h("h2", {}, "npm scopes"),
+      h("p", { class: "lede" }, "npm packages are published here under these scopes and no others, and a name under one is never fetched from npmjs. The .npmrc on the Connect page routes each of them here — so a package can never be installed from the public registry by mistake for one of yours."),
+      scopeRows.length ? h("table", {}, h("tbody", {}, scopeRows)) : h("p", { class: "muted" }, "No scopes: nothing can be published to npm here."),
+      admin && h("form", { class: "inline", style: "margin-top:12px", onsubmit: async (e) => { e.preventDefault(); await act(() => api("POST", "/npm/scopes", { scope: newScope.value }), `${newScope.value} added`); state.overview = null; render(); } },
+        h("label", { class: "field" }, "Scope", newScope), h("button", { class: "btn", type: "submit" }, "Add"))),
     h("div", { class: "grid two" },
       h("div", { class: "card" }, h("h2", {}, "Licence rules"),
         h("p", { class: "lede" }, "SPDX identifiers. Expressions are evaluated: ", h("code", {}, "MIT OR GPL-3.0"), " is admitted if either side is."),
-        rules.length ? h("table", {}, h("tbody", {}, rules)) : h("p", { class: "muted" }, policy.license_mode === "allow_list" ? "No rules — an empty allow list admits nothing." : "No rules — everything is admitted."),
+        rules.length ? h("table", {}, h("tbody", {}, rules)) : h("p", { class: "muted" }, policy.license_mode === "allow_list"
+          ? "No rules — an empty allow list admits nothing."
+          : "No rules — every licence is admitted. A licence nobody can read is still refused if npm is set to refuse it, and the cooldown above still applies."),
         admin && h("form", { class: "inline", style: "margin-top:12px", onsubmit: async (e) => { e.preventDefault(); await act(() => api("PUT", "/policy/licenses", { spdx_id: spdx.value, disposition: disp.value }), "Rule saved"); render(); } },
           h("label", { class: "field" }, "SPDX id", spdx), h("label", { class: "field", style: "flex:0 1 110px" }, "Rule", disp), h("button", { class: "btn", type: "submit" }, "Add"))),
-      h("div", { class: "card" }, h("h2", {}, "Names that are yours"),
-        h("p", { class: "lede" }, "Never fetched from upstream, published or not — reserve your npm scope so nobody else's package can answer for one you have not published yet."),
+      h("div", { class: "card" }, h("h2", {}, "Other names that are yours"),
+        h("p", { class: "lede" }, "Your npm scopes are never fetched from upstream already. Reserve anything else that must not be — an unscoped name your builds use, a partner's scope — so nobody else's package can answer for it."),
         reserved.length ? h("table", {}, h("tbody", {}, reserved)) : h("p", { class: "muted" }, "Nothing reserved."),
         admin && h("form", { class: "inline", style: "margin-top:12px", onsubmit: async (e) => { e.preventDefault(); await act(() => api("POST", "/policy/namespaces", { ecosystem: "npm", pattern: ns.value }), "Reserved"); render(); } },
           h("label", { class: "field" }, "npm prefix", ns), h("button", { class: "btn", type: "submit" }, "Reserve")))),
@@ -795,6 +955,24 @@ async function findingsPage() {
 
 // ------------------------------------------------------------- activity
 
+// An audit entry's context as "key: value" pairs, nested keys dotted —
+// raw JSON in a cell is for machines, and this page is for people.
+function detail(ctx) {
+  if (!ctx || typeof ctx !== "object") return "";
+  const out = [];
+  const walk = (o, pre) => {
+    for (const [k, v] of Object.entries(o)) {
+      // A field recorded as null is one that was not given; it says
+      // nothing, and "null" on the page reads as a value.
+      if (v === null || v === undefined) continue;
+      if (typeof v === "object" && !Array.isArray(v)) walk(v, `${pre}${k}.`);
+      else out.push(`${pre}${k}: ${Array.isArray(v) ? v.join(", ") : v}`);
+    }
+  };
+  walk(ctx, "");
+  return out.join(" · ");
+}
+
 async function activityPage() {
   const { entries } = await api("GET", "/audit?limit=200");
   return [
@@ -807,7 +985,7 @@ async function activityPage() {
         h("td", { class: "mono" }, e.action),
         // A field recorded as null is one that was not given; it says
         // nothing, and "null" on the page reads as a value.
-        h("td", { class: "wrap mono muted small" }, e.context ? JSON.stringify(e.context, (k, v) => (v === null ? undefined : v)) : "")))))) : h("p", { class: "muted" }, "Nothing yet.")),
+        h("td", { class: "wrap muted small" }, detail(e.context))))))) : h("p", { class: "muted" }, "Nothing yet.")),
   ];
 }
 
@@ -873,14 +1051,17 @@ function licenseCard(l) {
 }
 
 async function settingsPage() {
-  const ov = await api("GET", "/overview");
+  const ov = state.overview || await api("GET", "/overview");
   const lic = await api("GET", "/license");
   state.license = lic;
-  const name = h("input", { value: ov.org.name, required: true, pattern: "[a-z0-9-]+" });
+  // `\-`, not a bare `-`: browsers compile `pattern` with the `v` flag,
+  // under which `[a-z0-9-]` is not a valid class — the field's own check
+  // was silently skipped, with an error in the console.
+  const name = h("input", { value: ov.org.name, required: true, pattern: "[a-z0-9\\-]+" });
   return [
     pageHead("Settings"),
     h("div", { class: "card" }, h("h2", {}, "Organization name"),
-      h("p", { class: "lede" }, "Shown in the interface and used in the configuration snippets. Renaming it moves nothing: stored bytes are keyed by an id that never changes."),
+      h("p", { class: "lede" }, "Shown in the interface and used in the configuration snippets. Renaming it moves nothing: stored bytes are keyed by an id that never changes, and npm keeps the old scope beside the new one, so nothing published under it goes missing."),
       h("form", { class: "inline", onsubmit: async (e) => { e.preventDefault(); await act(() => api("PUT", "/org", { name: name.value }), "Renamed"); state.overview = null; render(); } },
         h("label", { class: "field" }, "Name", h("span", { class: "hint" }, "Lowercase letters, digits and dashes"), name),
         h("button", { class: "btn primary", type: "submit" }, "Save"))),

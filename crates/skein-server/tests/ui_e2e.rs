@@ -32,6 +32,8 @@ use skein_testkit::{Minio, Server};
 
 const ADMIN_PW: &str = "admin-walk-password";
 const READER_PW: &str = "rita-walk-password";
+const PAT_PW: &str = "pat-walk-password";
+const TOM_PW: &str = "tom-walk-password";
 /// Markup, where a UI that used `innerHTML` would run it.
 const HOSTILE: &str = r#"<img src=x onerror="document.title='PWNED'">"#;
 
@@ -134,8 +136,54 @@ fn the_ui_walks_clean_in_a_real_browser() {
     );
     assert_eq!(s, 200, "{body}");
 
-    // Two people can sign in (the admin and rita; `ci` cannot): a key
-    // for one is over its cap, and says so without refusing anything.
+    // A publisher the walk removes: what they published keeps their name.
+    let (pat, pat_token) = server.person(&admin, "pat", "publisher", &["package:write"]);
+    let (s, body) = server.req(
+        "PATCH",
+        &format!("/api/v1/users/{pat}"),
+        &admin,
+        Some(json!({ "password": PAT_PW })),
+    );
+    assert_eq!(s, 200, "{body}");
+    let (s, body) = server.req(
+        "PUT",
+        "/npm/@acme%2fpat-lib",
+        &pat_token,
+        Some(publish_doc("@acme/pat-lib", "1.0.0", b"pat's")),
+    );
+    assert_eq!(s, 201, "{body}");
+    // Somebody the walk locks out.
+    let (s, body) = server.req(
+        "POST",
+        "/api/v1/users",
+        &admin,
+        Some(json!({ "username": "tom", "role": "reader", "password": TOM_PW })),
+    );
+    assert_eq!(s, 201, "{body}");
+    // A package whose newest version — the one `latest` names — is
+    // yanked: nothing may recommend it.
+    for version in ["1.0.0", "1.1.0"] {
+        let (s, body) = server.req(
+            "PUT",
+            "/npm/@acme%2fgadget",
+            &admin,
+            Some(publish_doc("@acme/gadget", version, version.as_bytes())),
+        );
+        assert_eq!(s, 201, "{body}");
+    }
+    let (_, listed) = server.get("/api/v1/packages?q=gadget", &admin);
+    let gadget = listed["packages"][0]["id"].as_str().unwrap().to_string();
+    let (s, body) = server.req(
+        "POST",
+        &format!("/api/v1/packages/{gadget}/versions/1.1.0/yank"),
+        &admin,
+        Some(json!({ "yanked": true, "reason": "broke the build" })),
+    );
+    assert_eq!(s, 200, "{body}");
+
+    // Four people can sign in (the admin, rita, pat and tom; `ci`
+    // cannot): a key for one is over its cap, and says so without
+    // refusing anything.
     let mut p = issue::payload();
     p["kid"] = json!("walk-1");
     p["lid"] = json!("lic_walk_001");
@@ -151,6 +199,9 @@ fn the_ui_walks_clean_in_a_real_browser() {
         .env("BASE", &server.base)
         .env("PW", ADMIN_PW)
         .env("READER_PW", READER_PW)
+        .env("PAT_PW", PAT_PW)
+        .env("TOM_PW", TOM_PW)
+        .env("ADMIN_TOKEN", &admin)
         .env("LICENSE_KEY", key);
     if let Ok(dir) = std::env::var("SKEIN_UI_SHOTS") {
         walk.env("OUT", dir);

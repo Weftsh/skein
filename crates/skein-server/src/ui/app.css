@@ -131,6 +131,9 @@ input, select, textarea {
 input:focus, select:focus, textarea:focus { outline: none; border-color: var(--brand); box-shadow: 0 0 0 3px rgb(62 207 142 / 0.18); }
 label.field { display: flex; flex-direction: column; gap: 5px; font-weight: 500; font-size: 13px; }
 label.field span.hint { font-weight: 400; color: var(--text-muted); font-size: 12px; }
+/* A hint goes under its input, so a row of fields lines its inputs up
+   whether or not each has a hint. */
+label.field span.hint.after { order: 2; }
 form.inline { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; }
 form.inline label.field { flex: 1 1 160px; }
 .check { display: flex; align-items: center; gap: 8px; font-size: 13px; }
@@ -142,10 +145,28 @@ tr:last-child td { border-bottom: none; }
 /* `anywhere`, not `break-word`: a table sizes its columns by min-content,
    which `break-word` leaves at the longest unbroken token — a URL in a
    licence check's error widened the Settings table past a phone's width. */
-td.wrap { white-space: normal; overflow-wrap: anywhere; word-break: normal; }
-td.nowrap, th.nowrap { white-space: nowrap; }
+td.wrap { white-space: normal; overflow-wrap: anywhere; word-break: normal; min-width: 7rem; }
+/* …and a floor under it: `anywhere` also lets a squeezed column shrink
+   to one character, and on a phone "admin" came out as "ad / mi / n".
+   Below the floor the table scrolls, which it says it does. */
+/* Any element, not only a cell: `when()` wraps a relative time in a
+   span, and "23 min ago" broken over three lines reads as three facts. */
+.nowrap { white-space: nowrap; }
 td.num, th.num { text-align: right; }
+/* `.num` sets the monospace size for figures; a header keeps the header
+   size, or a table's headers come in two sizes. A button in a figure
+   column is still a button. */
+th.num { font-size: 10.5px; }
+td.num .btn { font-family: var(--font-sans); font-size: 12.5px; }
 .table-wrap { overflow-x: auto; margin: -4px -10px; }
+/* A table narrower screens must scroll says so: a fading edge where
+   more of it waits. `.scrolls` is set by the page when it overflows. */
+.table-wrap.scrolls {
+  background:
+    linear-gradient(to left, var(--surface-1), transparent) right / 24px 100% no-repeat local,
+    linear-gradient(to left, rgb(0 0 0 / 0.18), transparent) right / 14px 100% no-repeat scroll;
+}
+.table-wrap.scrolls::after { content: "scroll sideways for more →"; display: block; font-size: 11px; color: var(--text-muted); padding: 6px 10px 0; position: sticky; left: 0; }
 tr.link-row { cursor: pointer; }
 tr.link-row:hover td { background: var(--surface-2); }
 
