@@ -67,9 +67,17 @@ fn the_ui_walks_clean_in_a_real_browser() {
     }
     let signer = Signer::from_seed("walk-1", [21; 32]);
     // A licence endpoint that is not there: "Check now" must record the
-    // failure and show it, not throw.
+    // failure and show it, not throw. Its path is one unbroken token
+    // wider than a phone, because the error quotes the URL: a table cell
+    // that cannot break it pushes the page sideways. Six characters more
+    // in the real route once did exactly that, and the walk only noticed
+    // because the old URL had happened to fit.
     let closed = TcpListener::bind("127.0.0.1:0").unwrap();
-    let nowhere = format!("http://{}/v1/skein/check", closed.local_addr().unwrap());
+    let nowhere = format!(
+        "http://{}/v1/skein/check-{}",
+        closed.local_addr().unwrap(),
+        "x".repeat(60)
+    );
     drop(closed);
     let bucket = Minio::shared().bucket("ui-walk");
     let server = Server::builder(env!("CARGO_BIN_EXE_skein"), &bucket.base_url)

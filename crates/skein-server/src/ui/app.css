@@ -139,7 +139,10 @@ table { width: 100%; border-collapse: collapse; table-layout: auto; }
 th { text-align: left; font-family: var(--font-mono); font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-muted); padding: 8px 10px; border-bottom: 1px solid var(--border); white-space: nowrap; }
 td { padding: 10px; border-bottom: 1px solid var(--border); vertical-align: middle; max-width: 26rem; overflow: hidden; text-overflow: ellipsis; }
 tr:last-child td { border-bottom: none; }
-td.wrap { white-space: normal; overflow-wrap: break-word; word-break: normal; }
+/* `anywhere`, not `break-word`: a table sizes its columns by min-content,
+   which `break-word` leaves at the longest unbroken token — a URL in a
+   licence check's error widened the Settings table past a phone's width. */
+td.wrap { white-space: normal; overflow-wrap: anywhere; word-break: normal; }
 td.nowrap, th.nowrap { white-space: nowrap; }
 td.num, th.num { text-align: right; }
 .table-wrap { overflow-x: auto; margin: -4px -10px; }
