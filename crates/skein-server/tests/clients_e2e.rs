@@ -301,7 +301,7 @@ print("WRONG", [c != 0 and "invalid username or password" in o for c, o in wrong
 env.update(npm_config_fetch_retry_mintimeout="100", npm_config_fetch_retry_maxtimeout="200")
 code, out = npm("login", answers=(user, password))
 flat = " ".join(re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", out).split())
-said = re.search(r"too many failed sign-ins for \S+; try again in \d+ seconds", flat)
+said = re.search(r"too many failed sign-ins for \S+; try again in \d+ (?:seconds?|minutes?)", flat)
 print("LOCKED", code != 0, "429" in flat, said.group(0) if said else repr(flat[-800:]))
 "#;
     let out = run(
@@ -335,8 +335,8 @@ print("LOCKED", code != 0, "429" in flat, said.group(0) if said else repr(flat[-
         "npm login with a wrong password:\n{out}"
     );
     assert!(
-        out.contains("LOCKED True True too many failed sign-ins for lena; try again in "),
-        "a locked npm login did not say why:\n{out}"
+        out.contains("LOCKED True True too many failed sign-ins for lena; try again in 15 minutes"),
+        "a locked npm login did not say why, in minutes:\n{out}"
     );
     // …and the token it removed is revoked here, not just forgotten there,
     // and the refused login minted none.

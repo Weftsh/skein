@@ -1003,10 +1003,16 @@ fn retry_after(r: &skein_testkit::Reply) -> u64 {
 fn assert_throttled(r: &skein_testkit::Reply, who: &str) {
     assert_eq!(r.status, 429, "{who}: {}", r.text());
     let secs = retry_after(r);
-    let unit = if secs == 1 { "second" } else { "seconds" };
+    // Seconds under a minute and a half, whole minutes rounded up past
+    // it: a person is told a wait in the unit they would count it in.
+    let wait = match secs {
+        1 => "1 second".to_string(),
+        s if s < 90 => format!("{s} seconds"),
+        s => format!("{} minutes", s.div_ceil(60)),
+    };
     assert_eq!(
         r.json()["error"],
-        format!("too many failed sign-ins {who}; try again in {secs} {unit}"),
+        format!("too many failed sign-ins {who}; try again in {wait}"),
         "{}",
         r.text()
     );
@@ -1126,6 +1132,17 @@ fn failed_sign_ins_lock_a_name_on_every_password_door() {
     // …and then nothing is checked: a wrong password and the right one
     // get the same refusal, however the name is spelled, on either door.
     // Refusals do not count, so they do not stretch the lock either.
+    //
+    // A fresh lock is the full fifteen minutes, and says so in minutes:
+    // "try again in 900 seconds" left a person doing arithmetic.
+    let fresh = login(&server, "ada", ADA_PW);
+    assert_eq!(
+        fresh.json()["error"],
+        "too many failed sign-ins for ada; try again in 15 minutes",
+        "{}",
+        fresh.text()
+    );
+    assert_throttled(&fresh, "for ada");
     for (name, pw) in [
         ("ada", "not ada's password"),
         ("ada", ADA_PW),

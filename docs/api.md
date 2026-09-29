@@ -54,10 +54,11 @@ wrong `current` password is a **403**.
 5 failures for one username, or 20 from one address, within 15 minutes
 lock it for 15 minutes. A locked username or address is answered
 **429 Too Many Requests** with `Retry-After: <seconds>` and
-`{"error": "too many failed sign-ins for ada; try again in 840 seconds"}`
-(`from <address>` for an address), before the password is checked — the
-right one included. Refused attempts do not count. Tokens are never
-throttled. The limits, and how the address is found behind a proxy, are
+`{"error": "too many failed sign-ins for ada; try again in 14 minutes"}`
+(`from <address>` for an address; the wait is in seconds under a minute
+and a half, and in whole minutes, rounded up, past it), before the
+password is checked — the right one included. Refused attempts do not
+count. Tokens are never throttled. The limits, and how the address is found behind a proxy, are
 in [operations.md](operations.md#sign-in-protection).
 
 ## Packages

@@ -256,14 +256,39 @@ impl Refusal {
         whole_secs(self.retry_after)
     }
 
-    /// What the person is told.
+    /// What the person is told. The wait is in words — see
+    /// [`wait_in_words`] — where `Retry-After` stays in seconds.
     pub fn sentence(&self) -> String {
-        let n = self.retry_after_secs();
-        let unit = if n == 1 { "second" } else { "seconds" };
         format!(
-            "too many failed sign-ins {}; try again in {n} {unit}",
-            self.key.describe()
+            "too many failed sign-ins {}; try again in {}",
+            self.key.describe(),
+            wait_in_words(self.retry_after_secs())
         )
+    }
+}
+
+/// A wait as a person counts it: seconds under a minute and a half,
+/// whole minutes rounded up past that.
+///
+/// The default lock is fifteen minutes, and it used to be said as "try
+/// again in 900 seconds" — a number somebody who had just mistyped their
+/// password had to divide by sixty. Seconds stay below 90 because a
+/// minute is too coarse there: 61 seconds would read "2 minutes". Up,
+/// never down, so nobody is told to come back while the lock still
+/// stands.
+fn wait_in_words(secs: u64) -> String {
+    match secs {
+        1 => "1 second".to_string(),
+        s if s < 90 => format!("{s} seconds"),
+        s => minutes_in_words(s.div_ceil(60)),
+    }
+}
+
+fn minutes_in_words(n: u64) -> String {
+    if n == 1 {
+        "1 minute".to_string()
+    } else {
+        format!("{n} minutes")
     }
 }
 
@@ -908,5 +933,51 @@ mod tests {
             r.sentence(),
             "too many failed sign-ins for ada; try again in 1 second"
         );
+    }
+
+    /// The sentence counts a wait in the unit a person counts it in.
+    /// The default lock is fifteen minutes, and "try again in 900
+    /// seconds" left somebody who had just mistyped their password doing
+    /// arithmetic. Under a minute and a half it stays seconds, where a
+    /// minute would round a 61-second wait up to two; past that, whole
+    /// minutes, rounded up, so the person is never told to come back
+    /// before the lock is gone. `Retry-After` stays in seconds: it is
+    /// read by programs.
+    #[test]
+    fn a_wait_is_said_in_minutes_once_it_is_long_enough_to_count_them() {
+        let said = |ms: u64| {
+            Refusal {
+                key: Key::name("tom"),
+                retry_after: Duration::from_millis(ms),
+            }
+            .sentence()
+        };
+        for (ms, wait) in [
+            (900_000, "15 minutes"),
+            (899_500, "15 minutes"),
+            (840_001, "15 minutes"),
+            (840_000, "14 minutes"),
+            (121_000, "3 minutes"),
+            (120_000, "2 minutes"),
+            (90_000, "2 minutes"),
+            (89_000, "89 seconds"),
+            (60_000, "60 seconds"),
+            (1_000, "1 second"),
+        ] {
+            assert_eq!(
+                said(ms),
+                format!("too many failed sign-ins for tom; try again in {wait}"),
+                "{ms} ms"
+            );
+        }
+        let r = Refusal {
+            key: Key::name("tom"),
+            retry_after: Duration::from_secs(900),
+        };
+        assert_eq!(r.retry_after_secs(), 900, "Retry-After is still seconds");
+        // A lock set longer than the default reads the same way, and the
+        // singular exists for the unit the rule itself never reaches.
+        assert_eq!(wait_in_words(60 * 60), "60 minutes");
+        assert_eq!(minutes_in_words(1), "1 minute");
     }
 }

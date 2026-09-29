@@ -360,9 +360,9 @@ guesser gains nothing by moving between them.
   A lock lasts 15 minutes from the failure that filled it. All three
   numbers are settings — see the table above.
 - While a username or address is locked, every password check for it is
-  answered **429** with `Retry-After` and a sentence — `too many failed
-  sign-ins for ada; try again in 840 seconds` — **before** the password
-  is looked at. The right password is refused too; that is the point.
+  answered **429** with `Retry-After` (seconds) and a sentence — `too
+  many failed sign-ins for ada; try again in 14 minutes` — **before**
+  the password is looked at. The right password is refused too; that is the point.
 - A username nobody holds is counted and locked exactly like one
   somebody does, and answers in the same words, so a lock says nothing
   about who has an account. The username is read the way sign-in reads
