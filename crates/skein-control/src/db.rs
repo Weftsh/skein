@@ -477,6 +477,14 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     ALTER TABLE audit_log ADD COLUMN actor_name TEXT;
     UPDATE audit_log a SET actor_name = u.username
       FROM users u WHERE u.id = a.user_id;
+
+    -- A licence rule, shown as the admin typed it. `spdx_id` stays the
+    -- case-folded key — one rule per licence however it is spelled — and
+    -- this is the spelling. Rules from before were stored folded, and
+    -- that is the only spelling anybody still has.
+    ALTER TABLE org_license_rules ADD COLUMN display_id TEXT;
+    UPDATE org_license_rules SET display_id = spdx_id;
+    ALTER TABLE org_license_rules ALTER COLUMN display_id SET NOT NULL;
     "#,
 ];
 
@@ -1162,6 +1170,9 @@ mod tests {
                      VALUES ('01V1', '01PKG', '1.0.0', '1.0.0', '01ADA', 1),
                             ('01V2', '01PKG', '2.0.0', '2.0.0', NULL, 2),
                             ('01V3', '01PKG', '3.0.0', '3.0.0', NULL, 3);
+                 -- A licence rule, stored folded as every rule was.
+                 INSERT INTO org_license_rules (org_id, spdx_id, disposition, updated_at)
+                     VALUES ('01ORG', 'gpl-3.0', 'deny', 1);
                  -- One entry by ada, one by somebody already removed.
                  INSERT INTO audit_log (at, org_id, principal, user_id, action, context)
                      VALUES (1, '01ORG', 'user:01ADA', '01ADA', 'token.create', NULL),
@@ -1216,6 +1227,14 @@ mod tests {
         }
 
         let db = ControlDb::open(&url).expect("the upgrade applies to the rows already there");
+
+        // A rule from before is shown the only way anybody still has it.
+        assert_eq!(
+            crate::packages::admission_policy(&db, "01ORG", crate::packages::Ecosystem::Npm)
+                .unwrap()
+                .license_rules,
+            [("gpl-3.0".to_string(), "deny".to_string())]
+        );
 
         // Names are written in for everybody still here to name.
         let named: Vec<(String, Option<String>)> = db

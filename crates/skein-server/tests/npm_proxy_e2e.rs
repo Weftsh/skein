@@ -866,6 +866,118 @@ fn every_policy_change_is_audited_as_the_act_it_was() {
     assert!(server.healthy());
 }
 
+/// A licence rule names an SPDX licence, and reads back the way the admin
+/// wrote it.
+///
+/// The rules API took anything: "Not A Licence!!" was saved as a deny
+/// rule that could never match a package, and the policy screen showed
+/// an admin a rule that did nothing. And every rule came back
+/// lowercased — "WTFPL" typed, "wtfpl" shown, which reads as the
+/// registry having misheard. Now an id is refused unless it is in SPDX's
+/// shape, the refusal names it, and it is shown as typed; matching a
+/// package's licence is as case-blind as it was.
+#[test]
+fn a_licence_rule_is_an_spdx_id_and_is_shown_as_typed() {
+    let bucket = Minio::shared().bucket("npm-proxy-e2e");
+    let up = FakeRegistry::start();
+    up.add(
+        "shouty",
+        vec![Version::new("1.0.0", Some("wtfpl"), Some(&days_ago(400)))],
+    );
+    let server = spawn(&bucket.base_url, "registry-spdx-ids", &up);
+    let admin = server.bootstrap("acme");
+    enable_proxy(&server, &admin, "allow");
+    set_policy(&server, &admin, "block", 0);
+    let rule = |id: &str, disposition: Option<&str>| {
+        server.req(
+            "PUT",
+            "/api/v1/policy/licenses",
+            &admin,
+            Some(serde_json::json!({ "spdx_id": id, "disposition": disposition })),
+        )
+    };
+
+    for bad in [
+        "Not A Licence!!",
+        "MIT OR Apache-2.0",
+        "-MIT",
+        ".MIT",
+        "LicenseRef-",
+        "caf\u{e9}",
+        "MIT;",
+        &"A".repeat(65),
+    ] {
+        let (status, out) = rule(bad, Some("deny"));
+        assert_eq!(status, 400, "{bad:?} was saved: {out}");
+        let said = out["error"].as_str().unwrap_or_default();
+        assert!(
+            said.contains(bad),
+            "the refusal of {bad:?} does not name it: {out}"
+        );
+        assert!(said.contains("SPDX"), "{out}");
+    }
+    let (_, p) = server.get("/api/v1/policy", &admin);
+    assert_eq!(p["license_rules"], serde_json::json!([]), "{p}");
+
+    for good in [
+        "WTFPL",
+        "Apache-2.0",
+        "GPL-2.0+",
+        "LicenseRef-Acme-Internal.1",
+    ] {
+        let (status, out) = rule(good, Some("deny"));
+        assert_eq!(status, 200, "{good:?}: {out}");
+    }
+    let (_, p) = server.get("/api/v1/policy", &admin);
+    let mut ids: Vec<&str> = p["license_rules"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["spdx_id"].as_str().unwrap())
+        .collect();
+    ids.sort();
+    assert_eq!(
+        ids,
+        [
+            "Apache-2.0",
+            "GPL-2.0+",
+            "LicenseRef-Acme-Internal.1",
+            "WTFPL"
+        ],
+        "{p}"
+    );
+
+    // Matching is still blind to case: a package declaring "wtfpl" meets
+    // the rule typed "WTFPL".
+    let (status, doc) = server.get("/npm/shouty", &admin);
+    assert_eq!(status, 200, "{doc}");
+    assert!(
+        doc["versions"].as_object().is_some_and(|v| v.is_empty()),
+        "a rule typed in capitals missed a lowercase licence: {doc}"
+    );
+
+    // Another spelling of the same id is the same rule, shown the new way;
+    // and a rule is removed whatever case the removal is typed in.
+    let (status, out) = rule("wtfpl", Some("allow"));
+    assert_eq!(status, 200, "{out}");
+    let rules = out["license_rules"].as_array().unwrap().clone();
+    assert_eq!(
+        rules.len(),
+        4,
+        "a second spelling made a second rule: {out}"
+    );
+    assert!(
+        rules
+            .iter()
+            .any(|r| r["spdx_id"] == "wtfpl" && r["disposition"] == "allow"),
+        "{out}"
+    );
+    let (status, out) = rule("APACHE-2.0", None);
+    assert_eq!(status, 200, "{out}");
+    assert_eq!(out["license_rules"].as_array().unwrap().len(), 3, "{out}");
+    assert!(server.healthy());
+}
+
 /// An upstream that answers 200 with something that is not a document.
 ///
 /// A different failure from an outage, and it has to stay different:

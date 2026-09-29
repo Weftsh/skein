@@ -79,7 +79,7 @@ in [operations.md](operations.md#sign-in-protection).
 | `PUT /api/v1/ecosystems` | `{"ecosystem", "mode", "license_unknown"?: "block"\|"allow"}` — `org:admin` |
 | `GET /api/v1/policy?ecosystem=npm` | mode (`audit`/`block`), cooldown days, licence mode and rules, reserved names |
 | `PUT /api/v1/policy` | `{"mode", "cooldown_days", "license_mode": "deny_list"\|"allow_list"}` — `org:admin` |
-| `PUT /api/v1/policy/licenses` | `{"spdx_id", "disposition": "allow"\|"deny"\|null}` — null removes the rule |
+| `PUT /api/v1/policy/licenses` | `{"spdx_id", "disposition": "allow"\|"deny"\|null}` — null removes the rule. `spdx_id` must be an SPDX identifier (or `LicenseRef-…`), or it is a **400** naming it; it is matched case-insensitively and read back as typed |
 | `POST /api/v1/policy/namespaces` | `{"ecosystem", "pattern"}` — reserve a name prefix |
 | `DELETE /api/v1/policy/namespaces?ecosystem=&pattern=` | release one |
 | `GET /api/v1/findings?limit=` | what the policy refused, or would have in audit mode, with hit counts |

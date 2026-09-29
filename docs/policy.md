@@ -109,7 +109,14 @@ says so rather than leaving you to discover it through a build that
 resolves nothing at all.
 
 Rules are SPDX identifiers, compared case-insensitively, as SPDX defines
-them.
+them, and shown as you typed them: `WTFPL` stays `WTFPL`, and a rule for
+`wtfpl` afterwards is the same rule, respelled. An identifier is letters,
+digits, `.`, `-` and `+` (`MIT`, `Apache-2.0`, `GPL-2.0+`), at most 64
+characters, or `LicenseRef-<name>` for a licence of your own; anything
+else — a typo with a space in it, an expression like `MIT OR Apache-2.0`
+— is refused with a sentence naming it rather than saved as a rule that
+could never match. It is not checked against SPDX's list, so a licence
+published after your Skein release can still be named.
 
 Removing a rule is a third thing and not the same as denying: under a
 deny list an absent rule *admits*, and under an allow list it *refuses*.

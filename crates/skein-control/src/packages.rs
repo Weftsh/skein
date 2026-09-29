@@ -1698,7 +1698,9 @@ pub struct AdmissionPolicy {
     /// `allow_list` admits only what is listed; `deny_list` admits
     /// everything except.
     pub license_mode: String,
-    /// Case-folded SPDX id → `allow` | `deny`.
+    /// SPDX id, spelled as the admin last typed it → `allow` | `deny`.
+    /// Compared case-insensitively by whoever evaluates it
+    /// (`spdx::Policy` folds its keys), and shown as written.
     pub license_rules: Vec<(String, String)>,
     /// Normalised name prefixes this organization has claimed. Never
     /// proxied, published or not.
@@ -1732,12 +1734,13 @@ pub fn admission_policy(
         .map_err(|e| format!("admission policy: {e}"))?;
     let rules = guard
         .query(
-            "SELECT spdx_id, disposition FROM org_license_rules WHERE org_id = $1",
+            "SELECT display_id, disposition FROM org_license_rules WHERE org_id = $1 \
+             ORDER BY spdx_id",
             &[&org_id],
         )
         .map_err(|e| format!("licence rules: {e}"))?
         .iter()
-        .map(|r| (r.get("spdx_id"), r.get("disposition")))
+        .map(|r| (r.get("display_id"), r.get("disposition")))
         .collect();
     let reserved = guard
         .query(
@@ -1786,7 +1789,65 @@ pub fn set_admission_policy(
         .map_err(|e| format!("set admission policy: {e}"))
 }
 
+/// The longest licence id a rule may name. The longest on SPDX's list
+/// is under fifty; this is a ceiling on somebody's input, not a grammar.
+pub const MAX_SPDX_ID: usize = 64;
+
+/// A licence id a rule may name, trimmed, or a refusal naming it.
+///
+/// SPDX's shape and nothing looser: letters, digits, `.`, `-` and `+`,
+/// starting with a letter or a digit (`MIT`, `Apache-2.0`, `GPL-2.0+`),
+/// or `LicenseRef-<name>` for a licence of the organization's own. Not a
+/// check against SPDX's list — a licence published after this build is
+/// still a licence — but a rule that could never match anything is
+/// refused rather than saved: "Not A Licence!!" used to be accepted as a
+/// deny rule that did nothing, shown on the policy screen as though it
+/// did. An expression (`MIT OR Apache-2.0`) is refused too; a rule is
+/// about one licence, and the expression is what it is applied to.
+pub fn check_spdx_id(id: &str) -> Result<&str, String> {
+    let id = id.trim();
+    if id.is_empty() {
+        return Err("a licence rule needs an SPDX identifier".into());
+    }
+    let reference = id
+        .get(..11)
+        .filter(|p| p.eq_ignore_ascii_case("LicenseRef-"))
+        .map(|_| &id[11..]);
+    let shaped = match reference {
+        Some(name) => {
+            !name.is_empty()
+                && name
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-'))
+        }
+        None => {
+            id.as_bytes()[0].is_ascii_alphanumeric()
+                && id
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'+'))
+        }
+    };
+    if !shaped || id.len() > MAX_SPDX_ID {
+        return Err(format!(
+            "{id:?} is not an SPDX licence identifier: one is letters, digits, '.', '-' and \
+             '+', at most {MAX_SPDX_ID} characters, like MIT, Apache-2.0 or GPL-2.0+ — or \
+             LicenseRef-<name> for a licence of your own"
+        ));
+    }
+    Ok(id)
+}
+
 /// Add or replace one licence rule. `None` removes it.
+///
+/// Keyed case-folded, because SPDX ids compare case-insensitively and a
+/// rule that catches one spelling catches nothing — so `wtfpl` after
+/// `WTFPL` is the same rule. Shown as typed (`display_id`, the latest
+/// spelling), because a rule typed "WTFPL" and shown "wtfpl" reads as
+/// the registry having misheard.
+///
+/// Removing is not checked for shape: a rule saved before
+/// [`check_spdx_id`] existed has to stay removable, or it stays on the
+/// screen for ever.
 pub fn set_license_rule(
     db: &ControlDb,
     org_id: &str,
@@ -1794,31 +1855,35 @@ pub fn set_license_rule(
     disposition: Option<&str>,
     now: i64,
 ) -> Result<(), String> {
-    // Case-folded, because SPDX ids compare case-insensitively and a
-    // rule that catches one spelling catches nothing.
-    let id = spdx_id.trim().to_ascii_lowercase();
-    if id.is_empty() {
-        return Err("a licence rule needs an SPDX identifier".into());
-    }
     match disposition {
-        None => db
-            .lock()
-            .execute(
-                "DELETE FROM org_license_rules WHERE org_id = $1 AND spdx_id = $2",
-                &[&org_id, &id],
-            )
-            .map(|_| ())
-            .map_err(|e| format!("remove licence rule: {e}")),
-        Some(d) if d == "allow" || d == "deny" => db
-            .lock()
-            .execute(
-                "INSERT INTO org_license_rules (org_id, spdx_id, disposition, updated_at) \
-                 VALUES ($1, $2, $3, $4) \
-                 ON CONFLICT (org_id, spdx_id) DO UPDATE SET disposition = $3, updated_at = $4",
-                &[&org_id, &id, &d, &now],
-            )
-            .map(|_| ())
-            .map_err(|e| format!("set licence rule: {e}")),
+        None => {
+            let key = spdx_id.trim().to_ascii_lowercase();
+            if key.is_empty() {
+                return Err("a licence rule needs an SPDX identifier".into());
+            }
+            db.lock()
+                .execute(
+                    "DELETE FROM org_license_rules WHERE org_id = $1 AND spdx_id = $2",
+                    &[&org_id, &key],
+                )
+                .map(|_| ())
+                .map_err(|e| format!("remove licence rule: {e}"))
+        }
+        Some(d) if d == "allow" || d == "deny" => {
+            let shown = check_spdx_id(spdx_id)?;
+            let key = shown.to_ascii_lowercase();
+            db.lock()
+                .execute(
+                    "INSERT INTO org_license_rules \
+                         (org_id, spdx_id, display_id, disposition, updated_at) \
+                     VALUES ($1, $2, $3, $4, $5) \
+                     ON CONFLICT (org_id, spdx_id) DO UPDATE \
+                         SET display_id = $3, disposition = $4, updated_at = $5",
+                    &[&org_id, &key, &shown, &d, &now],
+                )
+                .map(|_| ())
+                .map_err(|e| format!("set licence rule: {e}"))
+        }
         Some(d) => Err(format!("unknown disposition {d:?} (allow | deny)")),
     }
 }
@@ -3032,6 +3097,88 @@ mod tests {
 
         assert!(set_ecosystem_policy(&db, &org, Ecosystem::Npm, "sometimes", "block", 7).is_err());
         assert!(set_ecosystem_policy(&db, &org, Ecosystem::Npm, MODE_PRIVATE, "maybe", 7).is_err());
+    }
+
+    /// A licence rule is an SPDX id in SPDX's shape, stored with the
+    /// spelling the admin used and keyed without it.
+    ///
+    /// Anything used to be saved — "Not A Licence!!" as a rule that could
+    /// never match — and every id came back lowercased. A rule written
+    /// before this check existed can still be removed: refusing to delete
+    /// a rule because it is malformed would leave it on the screen for
+    /// ever.
+    #[test]
+    fn a_licence_rule_is_an_spdx_id_kept_as_typed() {
+        for ok in [
+            "MIT",
+            "Apache-2.0",
+            "GPL-2.0+",
+            "0BSD",
+            "LicenseRef-Acme.Internal-1",
+            "licenseref-acme",
+            &"A".repeat(MAX_SPDX_ID),
+        ] {
+            assert_eq!(check_spdx_id(ok), Ok(ok), "{ok:?}");
+        }
+        assert_eq!(check_spdx_id("  MIT \n"), Ok("MIT"), "trimmed");
+        for bad in [
+            "Not A Licence!!",
+            "MIT OR Apache-2.0",
+            "(MIT)",
+            "-MIT",
+            ".MIT",
+            "+MIT",
+            "LicenseRef-",
+            "LicenseRef-a+b",
+            "MIT;",
+            "caf\u{e9}",
+            &"A".repeat(MAX_SPDX_ID + 1),
+        ] {
+            let err = check_spdx_id(bad).expect_err(bad);
+            assert!(err.contains(bad.trim()), "{bad:?}: {err}");
+            assert!(err.contains("SPDX"), "{err}");
+        }
+        assert!(check_spdx_id("   ").unwrap_err().contains("needs"));
+
+        let (db, org) = world("pkg-licence-rules");
+        set_license_rule(&db, &org, "WTFPL", Some("deny"), 1).unwrap();
+        set_license_rule(&db, &org, "Apache-2.0", Some("allow"), 1).unwrap();
+        assert!(set_license_rule(&db, &org, "Not A Licence!!", Some("deny"), 1).is_err());
+        let mut rules = admission_policy(&db, &org, Ecosystem::Npm)
+            .unwrap()
+            .license_rules;
+        rules.sort();
+        assert_eq!(
+            rules,
+            [
+                ("Apache-2.0".to_string(), "allow".to_string()),
+                ("WTFPL".to_string(), "deny".to_string()),
+            ]
+        );
+        // One rule per licence whatever the spelling, shown as last typed.
+        set_license_rule(&db, &org, "wtfpl", Some("allow"), 2).unwrap();
+        let rules = admission_policy(&db, &org, Ecosystem::Npm)
+            .unwrap()
+            .license_rules;
+        assert_eq!(rules.len(), 2, "{rules:?}");
+        assert!(rules.contains(&("wtfpl".to_string(), "allow".to_string())));
+        set_license_rule(&db, &org, "APACHE-2.0", None, 3).unwrap();
+
+        // A rule saved before ids were checked is still removable.
+        db.lock()
+            .execute(
+                "INSERT INTO org_license_rules (org_id, spdx_id, display_id, disposition, updated_at) \
+                 VALUES ($1, 'not a licence!!', 'Not A Licence!!', 'deny', 1)",
+                &[&org],
+            )
+            .unwrap();
+        set_license_rule(&db, &org, "Not A Licence!!", None, 4).unwrap();
+        assert_eq!(
+            admission_policy(&db, &org, Ecosystem::Npm)
+                .unwrap()
+                .license_rules,
+            [("wtfpl".to_string(), "allow".to_string())]
+        );
     }
 
     /// A search matches names containing the query, and `LIKE`'s own
