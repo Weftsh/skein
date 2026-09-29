@@ -1075,9 +1075,19 @@ async fn tags(state: SharedState, org: Org, name: String) -> Response {
     else {
         return oci_error(StatusCode::NOT_FOUND, "NAME_UNKNOWN", "no such repository");
     };
+    // A yanked tag is not listed. It is the container form of "hidden
+    // from resolution": nothing browsing the repository is offered it,
+    // and `get_manifest` still serves it by the tag and by the digest —
+    // the exact pin a deployment already holds keeps pulling, as a
+    // lockfile naming a yanked version keeps installing. Before this a
+    // yank of an image changed nothing a client could see.
     match packages::versions(&state.db, &p.id) {
         Ok(vs) => {
-            let mut tags: Vec<String> = vs.into_iter().map(|v| v.version).collect();
+            let mut tags: Vec<String> = vs
+                .into_iter()
+                .filter(|v| !v.yanked)
+                .map(|v| v.version)
+                .collect();
             tags.sort();
             Json(oci::tags_body(&name, &tags)).into_response()
         }

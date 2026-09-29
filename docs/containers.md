@@ -76,6 +76,22 @@ cannot silently break another deployment. To remove a whole repository,
 an admin deletes the package in the UI or with `DELETE
 /api/v1/packages/<id>`.
 
+## Yanking a tag
+
+A publisher can yank a tag — on the image's page in the UI, or with
+`POST /api/v1/packages/<id>/versions/<tag>/yank` and `{"yanked": true,
+"reason": "…"}` — which is the container form of a yanked version:
+
+- the tag is **no longer listed** by `GET /v2/<repository>/tags/list`,
+  so nothing browsing the repository is offered it;
+- it **still pulls**, by the tag and by its digest, so a deployment
+  already pinned to it keeps working — the same promise a yanked npm or
+  Cargo version makes to a lockfile.
+
+`{"yanked": false}` lists it again. Yanking marks the tag, not the
+image: pushing the tag again points it at a new manifest, and the new
+one is listed like any fresh push. To make a tag unpullable, delete it.
+
 ## Multi-platform images
 
 An image index — what `docker buildx build --platform …,… --push` and

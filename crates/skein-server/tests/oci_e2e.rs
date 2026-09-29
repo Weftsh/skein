@@ -855,6 +855,122 @@ fn a_tag_moves_and_the_manifest_it_left_is_still_there() {
     assert!(server.healthy());
 }
 
+/// The tags a repository lists, sorted.
+fn listed_tags(server: &Server, repo: &str, token: &str) -> Vec<String> {
+    let r = req(
+        "GET",
+        &format!("{}/{repo}/tags/list", v2(server)),
+        token,
+        None,
+    );
+    assert_eq!(r.status, 200, "{}", r.text());
+    let mut tags: Vec<String> = r.json()["tags"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no tags array: {}", r.text()))
+        .iter()
+        .map(|t| t.as_str().unwrap().to_string())
+        .collect();
+    tags.sort();
+    tags
+}
+
+/// Yanking a tag hides it from `tags/list`, and pulling it by that tag
+/// or by its digest keeps working — the container analogue of a yanked
+/// version: gone from what a person browsing sees, still there for the
+/// deployment that pinned it.
+///
+/// Before this a yank of an image tag was recorded and changed nothing
+/// any client could see: the tag went on being listed, and a person who
+/// yanked a bad image had no way to tell whether it had worked.
+#[test]
+fn a_yanked_tag_is_not_listed_and_still_pulls() {
+    let bucket = Minio::shared().bucket("oci-e2e");
+    let server = spawn(&bucket.base_url, "oci-yank");
+    let admin = acme(&server);
+    let (_, reader) = server.person(&admin, "rita", "reader", &["package:read"]);
+    let repo = "acme/yanked";
+    let b = v2(&server);
+    let config = push_blob(&server, repo, &admin, b"config");
+    let good_layer = push_blob(&server, repo, &admin, b"good");
+    let bad_layer = push_blob(&server, repo, &admin, b"bad!");
+    let good = manifest(&config, &[(&good_layer, 4)]);
+    let bad = manifest(&config, &[(&bad_layer, 4)]);
+    for (tag, body) in [("v1", &good), ("v2", &bad)] {
+        let r = req(
+            "PUT",
+            &format!("{b}/{repo}/manifests/{tag}"),
+            &admin,
+            Some(body),
+        );
+        assert_eq!(r.status, 201, "{tag}: {}", r.text());
+    }
+    assert_eq!(listed_tags(&server, repo, &reader), ["v1", "v2"]);
+
+    let (_, listed) = server.get("/api/v1/packages?ecosystem=oci", &admin);
+    let id = listed["packages"][0]["id"].as_str().unwrap().to_string();
+    let yank = |tag: &str, yanked: bool| {
+        let (s, out) = server.req(
+            "POST",
+            &format!("/api/v1/packages/{id}/versions/{tag}/yank"),
+            &admin,
+            Some(serde_json::json!({ "yanked": yanked, "reason": "a bad build" })),
+        );
+        assert_eq!(s, 200, "{tag}: {out}");
+        assert_eq!(out["yanked"], yanked, "{out}");
+    };
+
+    yank("v2", true);
+    assert_eq!(
+        listed_tags(&server, repo, &reader),
+        ["v1"],
+        "a yanked tag is still listed"
+    );
+    // Still pulls, exactly, by the tag and by the digest.
+    for reference in ["v2".to_string(), sha256(&bad)] {
+        let r = req(
+            "GET",
+            &format!("{b}/{repo}/manifests/{reference}"),
+            &reader,
+            None,
+        );
+        assert_eq!(r.status, 200, "{reference}: {}", r.text());
+        assert_eq!(r.body, bad, "{reference}");
+        let r = req(
+            "HEAD",
+            &format!("{b}/{repo}/manifests/{reference}"),
+            &reader,
+            None,
+        );
+        assert_eq!(r.status, 200, "HEAD {reference}");
+        assert_eq!(
+            r.header("docker-content-digest"),
+            Some(sha256(&bad).as_str())
+        );
+    }
+    let r = req(
+        "GET",
+        &format!("{b}/{repo}/blobs/{bad_layer}"),
+        &reader,
+        None,
+    );
+    assert_eq!(r.status, 200);
+    assert_eq!(r.body, b"bad!");
+
+    // Put back, it is listed again.
+    yank("v2", false);
+    assert_eq!(listed_tags(&server, repo, &reader), ["v1", "v2"]);
+
+    // Every tag yanked is a repository that lists nothing — an empty
+    // list, not a missing repository.
+    yank("v1", true);
+    yank("v2", true);
+    assert!(listed_tags(&server, repo, &reader).is_empty());
+    let r = req("GET", &format!("{b}/{repo}/manifests/v1"), &reader, None);
+    assert_eq!(r.status, 200);
+    assert_eq!(r.body, good);
+    assert!(server.healthy());
+}
+
 /// A tag is case-sensitive, as the distribution spec and every client
 /// say: `V1` and `v1` are two tags. Every other ecosystem's versions are
 /// matched case-insensitively here, and the OCI door inherited that, so
