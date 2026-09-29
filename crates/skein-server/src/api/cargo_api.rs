@@ -407,9 +407,9 @@ pub async fn yank(
         &state,
         &principal,
         if yanked {
-            "packages.yank"
+            "package.yank"
         } else {
-            "packages.unyank"
+            "package.unyank"
         },
         serde_json::json!({ "package": pkg.name, "version": ver.version, "reason": null }),
     );

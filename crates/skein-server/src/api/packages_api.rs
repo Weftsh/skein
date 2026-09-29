@@ -139,7 +139,7 @@ pub async fn set_ecosystem(
     audit(
         &state,
         &caller,
-        "packages.ecosystem",
+        "policy.ecosystem",
         serde_json::json!({
             "ecosystem": eco.as_str(),
             "mode": body.mode,
@@ -300,9 +300,9 @@ pub async fn yank(
         &state,
         &caller,
         if body.yanked {
-            "packages.yank"
+            "package.yank"
         } else {
-            "packages.unyank"
+            "package.unyank"
         },
         serde_json::json!({
             "package": pkg.name,
@@ -348,7 +348,7 @@ pub async fn remove(
     audit(
         &state,
         &caller,
-        "packages.delete",
+        "package.delete",
         serde_json::json!({
             "package": pkg.name,
             "ecosystem": pkg.ecosystem.as_str(),
@@ -470,7 +470,7 @@ pub async fn set_policy(
     audit(
         &state,
         &caller,
-        "packages.policy",
+        "policy.rules",
         serde_json::json!({
             "mode": body.mode,
             "cooldown_days": body.cooldown_days,
@@ -504,10 +504,17 @@ pub async fn set_license(
     ) {
         return json_error(StatusCode::BAD_REQUEST, e);
     }
+    // Two acts, two actions: a rule set and a rule removed differ by
+    // more than a `null`, and "who removed the GPL rule?" is a question
+    // about the action rather than a query over its context.
     audit(
         &state,
         &caller,
-        "packages.license_rule",
+        if body.disposition.is_some() {
+            "policy.license_rule.set"
+        } else {
+            "policy.license_rule.remove"
+        },
         serde_json::json!({
             "spdx_id": body.spdx_id,
             "disposition": body.disposition,
@@ -541,7 +548,7 @@ pub async fn reserve(
     audit(
         &state,
         &caller,
-        "packages.reserve",
+        "policy.reserve",
         serde_json::json!({
             "ecosystem": eco.as_str(),
             "pattern": body.pattern,
@@ -580,7 +587,7 @@ pub async fn release(
     audit(
         &state,
         &caller,
-        "packages.release",
+        "policy.release",
         serde_json::json!({ "ecosystem": eco.as_str(), "pattern": pattern }),
     );
     StatusCode::NO_CONTENT.into_response()
@@ -644,7 +651,7 @@ pub async fn forget_finding(
     audit(
         &state,
         &caller,
-        "packages.forget_finding",
+        "policy.dismiss_finding",
         serde_json::json!({
             "ecosystem": eco.as_str(),
             "package": name,

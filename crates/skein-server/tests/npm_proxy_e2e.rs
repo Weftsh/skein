@@ -758,6 +758,114 @@ fn the_policy_is_readable_by_a_member_and_writable_only_by_an_admin() {
     assert!(server.healthy());
 }
 
+/// The audit log's actions, oldest first, as `(action, context)`.
+fn audit_trail(server: &Server, admin: &str) -> Vec<(String, serde_json::Value)> {
+    let (status, log) = server.get("/api/v1/audit?limit=500", admin);
+    assert_eq!(status, 200, "{log}");
+    let mut out: Vec<(String, serde_json::Value)> = log["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| {
+            (
+                e["action"].as_str().unwrap_or_default().to_string(),
+                e["context"].clone(),
+            )
+        })
+        .collect();
+    out.reverse();
+    out
+}
+
+/// Every change to the admission policy is recorded under a name that
+/// says which change it was, in one vocabulary.
+///
+/// Adding a licence rule and removing one were both
+/// `packages.license_rule`, told apart only by a `null` in the context —
+/// so "who removed the GPL rule?" was a query over JSON rather than over
+/// the action. And the names were `packages.*` beside `package.publish`,
+/// for acts that are not about a package at all. Now a change to what
+/// the registry admits is `policy.*`, and each verb is its own action.
+#[test]
+fn every_policy_change_is_audited_as_the_act_it_was() {
+    let bucket = Minio::shared().bucket("npm-proxy-e2e");
+    let up = FakeRegistry::start();
+    up.add(
+        "copyleft-thing",
+        vec![Version::new("1.0.0", Some("GPL-3.0"), Some(&days_ago(400)))],
+    );
+    let server = spawn(&bucket.base_url, "registry-policy-audit", &up);
+    let admin = server.bootstrap("acme");
+    enable_proxy(&server, &admin, "allow");
+    set_policy(&server, &admin, "audit", 0);
+    deny_licence(&server, &admin, "GPL-3.0");
+    // Audit mode serves it and writes the finding down, which is the
+    // finding dismissed below.
+    let (status, doc) = server.get("/npm/copyleft-thing", &admin);
+    assert_eq!(status, 200, "{doc}");
+    for (method, path, body) in [
+        (
+            "PUT",
+            "/api/v1/policy/licenses",
+            Some(serde_json::json!({ "spdx_id": "GPL-3.0", "disposition": null })),
+        ),
+        (
+            "POST",
+            "/api/v1/policy/namespaces",
+            Some(serde_json::json!({ "ecosystem": "npm", "pattern": "@partner" })),
+        ),
+        (
+            "DELETE",
+            "/api/v1/policy/namespaces?ecosystem=npm&pattern=@partner",
+            None,
+        ),
+        (
+            "DELETE",
+            "/api/v1/findings?ecosystem=npm&name=copyleft-thing&version=1.0.0",
+            None,
+        ),
+    ] {
+        let (status, out) = server.req(method, path, &admin, body);
+        assert!(status == 200 || status == 204, "{method} {path}: {out}");
+    }
+
+    let trail = audit_trail(&server, &admin);
+    let acts: Vec<&str> = trail
+        .iter()
+        .map(|(a, _)| a.as_str())
+        .filter(|a| a.starts_with("policy.") || a.starts_with("packages."))
+        .collect();
+    assert_eq!(
+        acts,
+        [
+            "policy.ecosystem",
+            "policy.rules",
+            "policy.license_rule.set",
+            "policy.license_rule.remove",
+            "policy.reserve",
+            "policy.release",
+            "policy.dismiss_finding",
+        ],
+        "{trail:?}"
+    );
+    // Setting and removing a rule are two acts, and each says what it
+    // was about.
+    let set = &trail
+        .iter()
+        .find(|(a, _)| a == "policy.license_rule.set")
+        .unwrap()
+        .1;
+    assert_eq!(set["spdx_id"], "GPL-3.0", "{set}");
+    assert_eq!(set["disposition"], "deny", "{set}");
+    let removed = &trail
+        .iter()
+        .find(|(a, _)| a == "policy.license_rule.remove")
+        .unwrap()
+        .1;
+    assert_eq!(removed["spdx_id"], "GPL-3.0", "{removed}");
+    assert!(server.healthy());
+}
+
 /// An upstream that answers 200 with something that is not a document.
 ///
 /// A different failure from an outage, and it has to stay different:

@@ -1,6 +1,16 @@
 //! Append-only audit log. No UPDATE or DELETE statement for this table
-//! exists anywhere in the codebase — immutability by construction at the
-//! application layer.
+//! exists anywhere in the application — immutability by construction at
+//! the application layer. The one UPDATE it has ever had is migration
+//! 0005's, which renamed the action vocabulary and left every row's act,
+//! time, actor and context as they were.
+//!
+//! Actions are `<subject>.<verb>`: `package.*` for what happened to a
+//! package (`publish`, `yank`, `unyank`, `untag`, `delete`), `policy.*`
+//! for what the registry admits (`ecosystem`, `rules`,
+//! `license_rule.set`, `license_rule.remove`, `reserve`, `release`,
+//! `dismiss_finding`), and `token.*`, `user.*`, `session.*`, `org.*`,
+//! `license.*`. One act, one action: a verb that meant two things could
+//! only be told apart by reading its context.
 //!
 //! What is recorded: every change to what the registry holds (publish,
 //! yank, delete, tag), to who may reach it (people, roles, tokens), and

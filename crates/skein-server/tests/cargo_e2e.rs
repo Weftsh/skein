@@ -326,7 +326,7 @@ fn a_yank_shows_in_the_index_at_once_and_the_crate_still_downloads() {
     // Both are in the audit log under the person who did them, the same
     // record the REST door writes.
     let actions = audit_actions(&server, &admin);
-    for want in ["packages.yank", "packages.unyank"] {
+    for want in ["package.yank", "package.unyank"] {
         assert!(
             actions.contains(&(want.into(), "ci".into())),
             "{want} not in {actions:?}"

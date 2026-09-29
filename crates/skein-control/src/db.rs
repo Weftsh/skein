@@ -127,7 +127,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     CREATE INDEX sessions_user ON sessions(user_id);
 
     -- Append-only. No UPDATE or DELETE statement for this table exists
-    -- anywhere in the codebase.
+    -- anywhere in the application; migration 0005 renamed its action
+    -- vocabulary once, and changed nothing any row records.
     CREATE TABLE audit_log (
         seq       BIGSERIAL PRIMARY KEY,
         at        BIGINT NOT NULL,
@@ -418,6 +419,46 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     ALTER TABLE package_blobs ADD COLUMN touched_at BIGINT;
     UPDATE package_blobs SET touched_at = created_at;
     ALTER TABLE package_blobs ALTER COLUMN touched_at SET NOT NULL;
+    "#,
+    // 0005 — what a manual pass through the UI found the data could not
+    // say.
+    r#"
+    -- The audit log's vocabulary, made one. Changes to a package were
+    -- `packages.*` beside `package.publish`; changes to what the
+    -- registry admits were `packages.*` too, though no package is
+    -- involved; and adding a licence rule and removing one were the same
+    -- action, told apart only by a `null` in the context. Now: `package.*`
+    -- for what happened to a package, `policy.*` for what the registry
+    -- admits, and a verb per act.
+    --
+    -- The one UPDATE this table has ever had, and it renames: which act
+    -- each row records, when, by whom and with what context, is exactly
+    -- as it was. A history that answered `package.yank` for yanks after
+    -- the upgrade and `packages.yank` before it would have a hole in it
+    -- for anybody who searched.
+    --
+    -- A licence rule written with a disposition was set; one written
+    -- without — `null`, absent, or a context nobody can read — was
+    -- removed. Read with a pattern rather than as JSON, so a context that
+    -- is not JSON cannot stop the upgrade.
+    UPDATE audit_log SET action = CASE action
+            WHEN 'packages.yank'           THEN 'package.yank'
+            WHEN 'packages.unyank'         THEN 'package.unyank'
+            WHEN 'packages.delete'         THEN 'package.delete'
+            WHEN 'packages.ecosystem'      THEN 'policy.ecosystem'
+            WHEN 'packages.policy'         THEN 'policy.rules'
+            WHEN 'packages.reserve'        THEN 'policy.reserve'
+            WHEN 'packages.release'        THEN 'policy.release'
+            WHEN 'packages.forget_finding' THEN 'policy.dismiss_finding'
+            WHEN 'packages.license_rule'   THEN
+                CASE WHEN context ~ '"disposition"\s*:\s*"(allow|deny)"'
+                     THEN 'policy.license_rule.set'
+                     ELSE 'policy.license_rule.remove' END
+        END
+     WHERE action IN ('packages.yank', 'packages.unyank', 'packages.delete',
+                      'packages.ecosystem', 'packages.policy', 'packages.reserve',
+                      'packages.release', 'packages.forget_finding',
+                      'packages.license_rule');
     "#,
 ];
 
@@ -1053,6 +1094,126 @@ mod tests {
             crate::packages::unreferenced_blobs(&db, "01ORG", 5_000, 10).unwrap(),
             vec![("a".repeat(64), 5)]
         );
+    }
+
+    /// An install upgraded to 0005 keeps everything it already holds, in
+    /// the shape this build reads it.
+    ///
+    /// Its audit history reads under the names this build writes — a
+    /// search for `package.yank` that missed every yank from before the
+    /// upgrade would be a history with a hole in it — and the one old
+    /// name that meant two acts is split by what each row did: a licence
+    /// rule written with a disposition was set, one without was removed.
+    /// Everything else is left exactly as it was.
+    ///
+    /// Found by content rather than by number, like the test above.
+    #[test]
+    fn what_an_install_held_before_0005_reads_the_same_after_it() {
+        let url = skein_testkit::pg::test_db_url("db_0005_upgrade");
+        let at = MIGRATIONS
+            .iter()
+            .position(|m| m.contains("'packages.license_rule'"))
+            .expect("the migration that renames the audit actions");
+        {
+            let mut c = Client::connect(&url, NoTls).unwrap();
+            c.batch_execute(
+                "CREATE TABLE schema_migrations (
+                    version BIGINT PRIMARY KEY, applied_at BIGINT NOT NULL)",
+            )
+            .unwrap();
+            for (i, sql) in MIGRATIONS[..at].iter().enumerate() {
+                c.batch_execute(sql).unwrap();
+                c.execute(
+                    "INSERT INTO schema_migrations (version, applied_at) VALUES ($1, 0)",
+                    &[&((i + 1) as i64)],
+                )
+                .unwrap();
+            }
+            c.batch_execute("INSERT INTO orgs (id, name, created_at) VALUES ('01ORG', 'acme', 1)")
+                .unwrap();
+            for (action, context) in [
+                (
+                    "packages.yank",
+                    Some(r#"{"package":"w","version":"1.0.0"}"#),
+                ),
+                (
+                    "packages.unyank",
+                    Some(r#"{"package":"w","version":"1.0.0"}"#),
+                ),
+                ("packages.delete", Some(r#"{"package":"w"}"#)),
+                (
+                    "packages.ecosystem",
+                    Some(r#"{"ecosystem":"npm","mode":"proxy"}"#),
+                ),
+                ("packages.policy", Some(r#"{"mode":"block"}"#)),
+                (
+                    "packages.license_rule",
+                    Some(r#"{"spdx_id":"GPL-3.0","disposition":"deny"}"#),
+                ),
+                (
+                    "packages.license_rule",
+                    Some(r#"{"spdx_id":"MIT","disposition":"allow","token_id":"t"}"#),
+                ),
+                (
+                    "packages.license_rule",
+                    Some(r#"{"spdx_id":"GPL-3.0","disposition":null}"#),
+                ),
+                ("packages.license_rule", Some(r#"{"spdx_id":"ISC"}"#)),
+                ("packages.license_rule", Some("not json at all")),
+                ("packages.license_rule", None),
+                ("packages.reserve", Some(r#"{"pattern":"@acme"}"#)),
+                ("packages.release", Some(r#"{"pattern":"@acme"}"#)),
+                ("packages.forget_finding", Some(r#"{"package":"x"}"#)),
+                ("package.publish", Some(r#"{"name":"w"}"#)),
+                ("package.untag", Some(r#"{"name":"app"}"#)),
+                ("token.create", None),
+                ("org.rename", Some(r#"{"name":"acme"}"#)),
+            ] {
+                c.execute(
+                    "INSERT INTO audit_log (at, org_id, principal, user_id, action, context) \
+                     VALUES (1, '01ORG', 'system:test', NULL, $1, $2)",
+                    &[&action, &context],
+                )
+                .unwrap();
+            }
+        }
+
+        let db = ControlDb::open(&url).expect("the upgrade applies to the rows already there");
+        let rows = db
+            .lock()
+            .query("SELECT action, context FROM audit_log ORDER BY seq", &[])
+            .unwrap();
+        let actions: Vec<String> = rows.iter().map(|r| r.get("action")).collect();
+        assert_eq!(
+            actions,
+            [
+                "package.yank",
+                "package.unyank",
+                "package.delete",
+                "policy.ecosystem",
+                "policy.rules",
+                "policy.license_rule.set",
+                "policy.license_rule.set",
+                "policy.license_rule.remove",
+                "policy.license_rule.remove",
+                "policy.license_rule.remove",
+                "policy.license_rule.remove",
+                "policy.reserve",
+                "policy.release",
+                "policy.dismiss_finding",
+                "package.publish",
+                "package.untag",
+                "token.create",
+                "org.rename",
+            ]
+        );
+        // What happened is untouched: only the vocabulary moved.
+        let contexts: Vec<Option<String>> = rows.iter().map(|r| r.get("context")).collect();
+        assert_eq!(
+            contexts[5].as_deref(),
+            Some(r#"{"spdx_id":"GPL-3.0","disposition":"deny"}"#)
+        );
+        assert_eq!(contexts[9].as_deref(), Some("not json at all"));
     }
 
     /// A failing migration says what was wrong with it.

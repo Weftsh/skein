@@ -754,9 +754,9 @@ fn the_management_api_shows_a_package_and_refuses_what_it_should() {
         })
         .collect();
     for want in [
-        ("packages.delete", "admin"),
-        ("packages.unyank", "ci"),
-        ("packages.yank", "ci"),
+        ("package.delete", "admin"),
+        ("package.unyank", "ci"),
+        ("package.yank", "ci"),
         ("package.publish", "ci"),
     ] {
         assert!(actions.contains(&want), "{want:?} not in {actions:?}");
