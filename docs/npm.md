@@ -87,7 +87,16 @@ curl -X POST https://skein.example.com/api/v1/packages/$ID/versions/1.0.0/yank \
 
 A yanked version is marked deprecated in the packument and **still
 installs by exact version**, so a lockfile that names it keeps
-building. `npm unpublish` is refused: deleting a package is an admin's
+building.
+
+`latest` never names a yanked version. If the version it points at is
+yanked, the packument serves `latest` as the highest version nobody
+yanked — by semver, so `1.10.0` is above `1.9.0`, and a release is
+preferred to any pre-release — or leaves `latest` out when every
+version is yanked. `npm view` and an `npm install` with no range then
+get the previous release rather than the one you took down. The tag
+itself does not move: un-yank the version and `latest` names it again.
+Other dist-tags are served as they were set. `npm unpublish` is refused: deleting a package is an admin's
 act in the UI, because it breaks everything that depends on it.
 
 ## Everything through Skein: the proxy

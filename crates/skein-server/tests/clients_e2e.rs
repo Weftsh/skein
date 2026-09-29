@@ -178,6 +178,42 @@ fn npm_publishes_views_and_installs_through_skein() {
         .expect("the installed package");
     assert_eq!(installed, "module.exports = 'widget 1.2.3';\n");
 
+    // A newer release, yanked: npm's own `npm view` no longer calls it
+    // current. It used to — `latest` went on naming the yanked version,
+    // and so did every install that asked for no range.
+    std::fs::write(
+        src.join("package.json"),
+        r#"{ "name": "@acme/widget", "version": "1.2.4", "license": "MIT",
+             "main": "index.js", "description": "a widget" }"#,
+    )
+    .unwrap();
+    run(&src, "npm", &["publish"], &env);
+    let (_, listed) = server.get("/api/v1/packages?q=widget", &admin);
+    let id = listed["packages"][0]["id"].as_str().unwrap().to_string();
+    let latest = |cenv: &[(&str, &str)]| -> serde_json::Value {
+        let out = run(
+            &consumer,
+            "npm",
+            &["view", "@acme/widget", "--json", "--prefer-online"],
+            cenv,
+        );
+        serde_json::from_str(&out).unwrap_or_else(|e| panic!("{e}: {out}"))
+    };
+    assert_eq!(latest(&cenv)["dist-tags"]["latest"], "1.2.4");
+    let (status, body) = server.req(
+        "POST",
+        &format!("/api/v1/packages/{id}/versions/1.2.4/yank"),
+        &admin,
+        Some(serde_json::json!({ "yanked": true, "reason": "a bad build" })),
+    );
+    assert_eq!(status, 200, "{body}");
+    let view = latest(&cenv);
+    assert_eq!(view["dist-tags"]["latest"], "1.2.3", "{view}");
+    assert_eq!(
+        view["version"], "1.2.3",
+        "npm view calls a yanked version current: {view}"
+    );
+
     // …and cannot publish, with the reason in npm's own output.
     let pubdir = scratch("npm-reader-publish");
     std::fs::write(

@@ -160,6 +160,86 @@ fn a_yanked_version_is_marked_and_still_downloadable() {
     assert_eq!(bytes, tarball);
 }
 
+/// `latest` never names a yanked version.
+///
+/// Yanking the newest release left `dist-tags.latest` pointing at it, so
+/// `npm view` reported the yanked version as current and every
+/// `npm install <pkg>` without a range asked for exactly what had been
+/// taken down. Now the packument serves `latest` as the highest version
+/// nobody yanked — a release over a pre-release — and leaves `latest`
+/// out when there is none; the stored tag is untouched, so un-yanking
+/// puts it back. Other tags are left as stored: `next` pointing at a
+/// yanked beta is what somebody chose.
+#[test]
+fn latest_never_names_a_yanked_version() {
+    let bucket = Minio::shared().bucket("npm-e2e");
+    let server = spawn(&bucket.base_url, "npm-yank-latest");
+    let admin = server.bootstrap("acme");
+    // Published out of semver order, so "highest" cannot be "newest".
+    for (version, tags) in [
+        ("1.10.0", serde_json::json!({ "latest": "1.10.0" })),
+        ("1.9.0", serde_json::json!({})),
+        (
+            "2.0.0-beta.1",
+            serde_json::json!({ "next": "2.0.0-beta.1" }),
+        ),
+        ("1.11.0", serde_json::json!({ "latest": "1.11.0" })),
+    ] {
+        let mut doc = publish_doc("@acme/widget", version, version.as_bytes());
+        doc["dist-tags"] = tags;
+        let (s, body) = server.req("PUT", "/npm/@acme%2fwidget", &admin, Some(doc));
+        assert_eq!(s, 201, "{version}: {body}");
+    }
+    let (_, listed) = server.get("/api/v1/packages", &admin);
+    let id = listed["packages"][0]["id"].as_str().unwrap().to_string();
+    let yank = |version: &str, yanked: bool| {
+        let (s, out) = server.req(
+            "POST",
+            &format!("/api/v1/packages/{id}/versions/{version}/yank"),
+            &admin,
+            Some(serde_json::json!({ "yanked": yanked })),
+        );
+        assert_eq!(s, 200, "{version}: {out}");
+    };
+    let tags = || {
+        let (s, doc) = server.get("/npm/@acme%2fwidget", &admin);
+        assert_eq!(s, 200, "{doc}");
+        assert_eq!(
+            doc["versions"].as_object().map(|v| v.len()),
+            Some(4),
+            "a yank removed a version somebody's lockfile names: {doc}"
+        );
+        doc["dist-tags"].clone()
+    };
+    assert_eq!(
+        tags(),
+        serde_json::json!({ "latest": "1.11.0", "next": "2.0.0-beta.1" })
+    );
+
+    yank("1.11.0", true);
+    assert_eq!(
+        tags(),
+        serde_json::json!({ "latest": "1.10.0", "next": "2.0.0-beta.1" }),
+        "latest named a yanked version, or skipped past the highest release"
+    );
+    yank("1.10.0", true);
+    assert_eq!(tags()["latest"], "1.9.0", "1.9.0 is not higher than 1.10.0");
+    // With no release left, the highest pre-release is what there is.
+    yank("1.9.0", true);
+    assert_eq!(tags()["latest"], "2.0.0-beta.1");
+    // Everything yanked: no latest at all, and `next` as it was stored.
+    yank("2.0.0-beta.1", true);
+    assert_eq!(
+        tags(),
+        serde_json::json!({ "next": "2.0.0-beta.1" }),
+        "latest pointed at a yanked version"
+    );
+    // The stored tag never moved: un-yank, and it is back.
+    yank("1.11.0", false);
+    assert_eq!(tags()["latest"], "1.11.0");
+    assert!(server.healthy());
+}
+
 /// Nothing is public. Without a credential that authenticates, every
 /// door answers with a challenge and nothing else — not a 404 for an
 /// absent package, not a 200 for a present one — so nobody learns which

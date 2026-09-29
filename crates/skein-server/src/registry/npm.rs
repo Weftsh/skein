@@ -305,12 +305,33 @@ pub fn packument(
     // tag means. This happens for real in two places: a version whose
     // files are gone, and a cached proxied version the admission policy
     // now withholds.
+    //
+    // `latest` naming a version that is here but **yanked** is the other
+    // case, and the opposite answer: it is served as [`latest_unyanked`].
+    // A yank is somebody saying "not this one", and `latest` is what
+    // `npm install <pkg>` with no range and `npm view` read as current —
+    // left alone, both went on offering exactly what had been taken down.
+    // npm's own registry moves `latest` the same way when the version it
+    // names is unpublished. Only here, in what is served: the stored tag
+    // does not move, so un-yanking puts it back; and only `latest` —
+    // `next` pointing at a yanked beta is what somebody chose.
+    let yanked: std::collections::BTreeSet<&str> = versions
+        .iter()
+        .filter(|v| v.yanked)
+        .map(|v| v.version.as_str())
+        .collect();
     out.insert(
         "dist-tags".into(),
         serde_json::Value::Object(
             tags.iter()
                 .filter(|(_, v)| vs_keys.contains(v.as_str()))
-                .map(|(t, v)| (t.clone(), serde_json::json!(v)))
+                .filter_map(|(t, v)| {
+                    if t == "latest" && yanked.contains(v.as_str()) {
+                        latest_unyanked(versions).map(|l| (t.clone(), serde_json::json!(l)))
+                    } else {
+                        Some((t.clone(), serde_json::json!(v)))
+                    }
+                })
                 .collect(),
         ),
     );
@@ -320,6 +341,119 @@ pub fn packument(
         out.insert("_hasYanked".into(), serde_json::json!(true));
     }
     serde_json::Value::Object(out)
+}
+
+/// What `latest` is served as when the version it names is yanked: the
+/// highest version nobody yanked, by semver precedence — a release over
+/// any pre-release, a pre-release only when no release is left — or
+/// `None` when everything is yanked, and `latest` is left out.
+///
+/// Highest by [`semver_cmp`], not newest by publish time: a fix to an
+/// older line published this morning is not what "latest" means. A
+/// release over a pre-release, because promoting `2.0.0-beta.1` to
+/// `latest` would hand every unpinned install a beta nobody tagged for
+/// them. A version that is not semver cannot be placed, so it is never
+/// chosen.
+pub fn latest_unyanked(versions: &[VersionView]) -> Option<&str> {
+    let mut candidates: Vec<(Semver<'_>, &str)> = versions
+        .iter()
+        .filter(|v| !v.yanked)
+        .filter_map(|v| Semver::parse(&v.version).map(|s| (s, v.version.as_str())))
+        .collect();
+    candidates.sort_by(|a, b| a.0.cmp(&b.0));
+    let release = candidates.iter().rev().find(|(s, _)| s.pre.is_empty());
+    release.or(candidates.last()).map(|(_, v)| *v)
+}
+
+/// A version in semver's shape — `MAJOR.MINOR.PATCH`, an optional
+/// `-pre.release` and an optional `+build` — held for ordering.
+///
+/// Written here because nothing else in the workspace orders versions,
+/// and one purpose does not justify a dependency: the only question
+/// asked of it is which of two versions is higher.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Semver<'a> {
+    core: [u64; 3],
+    /// Pre-release identifiers; empty for a release.
+    pre: Vec<&'a str>,
+}
+
+impl<'a> Semver<'a> {
+    /// `None` for anything that is not semver: a registry may hold a
+    /// version npm would not publish today, and an order guessed for it
+    /// is an order nobody can check.
+    pub fn parse(v: &'a str) -> Option<Semver<'a>> {
+        let v = v.trim();
+        let v = v.split_once('+').map_or(v, |(core, _build)| core);
+        let (core, pre) = match v.split_once('-') {
+            Some((core, pre)) => (core, Some(pre)),
+            None => (v, None),
+        };
+        let mut nums = core.split('.');
+        let mut out = [0u64; 3];
+        for n in &mut out {
+            let part = nums.next()?;
+            let digits = !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit());
+            if !digits || (part.len() > 1 && part.starts_with('0')) {
+                return None;
+            }
+            *n = part.parse().ok()?;
+        }
+        if nums.next().is_some() {
+            return None;
+        }
+        let pre = match pre {
+            None => Vec::new(),
+            Some(p) => {
+                let ids: Vec<&str> = p.split('.').collect();
+                let ok = ids.iter().all(|id| {
+                    !id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                });
+                if !ok {
+                    return None;
+                }
+                ids
+            }
+        };
+        Some(Semver { core: out, pre })
+    }
+}
+
+impl Ord for Semver<'_> {
+    /// Semver 2.0.0's precedence: the three numbers; then a release above
+    /// any pre-release of it; then pre-releases identifier by identifier —
+    /// numeric ones by value and below alphanumeric ones, alphanumeric
+    /// ones by ASCII, and a shorter list below a longer one it prefixes.
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+        self.core
+            .cmp(&other.core)
+            .then_with(|| match (self.pre.is_empty(), other.pre.is_empty()) {
+                (true, true) => Ordering::Equal,
+                (true, false) => Ordering::Greater,
+                (false, true) => Ordering::Less,
+                (false, false) => {
+                    for (a, b) in self.pre.iter().zip(&other.pre) {
+                        let order = match (a.parse::<u64>(), b.parse::<u64>()) {
+                            (Ok(x), Ok(y)) => x.cmp(&y),
+                            (Ok(_), Err(_)) => Ordering::Less,
+                            (Err(_), Ok(_)) => Ordering::Greater,
+                            (Err(_), Err(_)) => a.cmp(b),
+                        };
+                        if order != Ordering::Equal {
+                            return order;
+                        }
+                    }
+                    self.pre.len().cmp(&other.pre.len())
+                }
+            })
+    }
+}
+
+impl PartialOrd for Semver<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 /// `sha512-<base64>`, npm's Subresource Integrity spelling.
@@ -934,6 +1068,119 @@ mod tests {
             doc["dist-tags"]["stable"], "1.0.0",
             "a tag that does resolve was dropped too: {doc}"
         );
+    }
+
+    /// Semver's own precedence example, in order, and the cases a
+    /// string comparison gets wrong.
+    #[test]
+    fn versions_order_by_semver_precedence() {
+        let ordered = [
+            "0.9.0",
+            "1.0.0-alpha",
+            "1.0.0-alpha.1",
+            "1.0.0-alpha.beta",
+            "1.0.0-beta",
+            "1.0.0-beta.2",
+            "1.0.0-beta.11",
+            "1.0.0-rc.1",
+            "1.0.0",
+            "1.2.0",
+            "1.9.0",
+            "1.10.0",
+            "10.0.0",
+        ];
+        for pair in ordered.windows(2) {
+            let (a, b) = (Semver::parse(pair[0]), Semver::parse(pair[1]));
+            assert!(a.is_some() && b.is_some(), "{pair:?}");
+            assert!(a < b, "{} is not below {}", pair[0], pair[1]);
+        }
+        // Build metadata is not part of precedence.
+        assert_eq!(
+            Semver::parse("1.0.0+build.5")
+                .unwrap()
+                .cmp(&Semver::parse("1.0.0").unwrap()),
+            std::cmp::Ordering::Equal
+        );
+        for not_semver in [
+            "",
+            "1",
+            "1.0",
+            "1.0.0.0",
+            "v1.0.0",
+            "01.0.0",
+            "1.0.0-",
+            "1.0.0-a..b",
+            "latest",
+        ] {
+            assert!(Semver::parse(not_semver).is_none(), "{not_semver:?}");
+        }
+    }
+
+    /// What `latest` falls back to, argued case by case.
+    #[test]
+    fn latest_falls_back_to_the_highest_release_nobody_yanked() {
+        let vs = |list: &[(&str, bool)]| -> Vec<VersionView> {
+            list.iter().map(|(v, y)| view(v, *y)).collect()
+        };
+        // Highest, not newest: 1.10.0 published before 1.9.0.
+        assert_eq!(
+            latest_unyanked(&vs(&[
+                ("1.10.0", false),
+                ("1.9.0", false),
+                ("1.11.0", true)
+            ])),
+            Some("1.10.0")
+        );
+        // A release over any pre-release, however high.
+        assert_eq!(
+            latest_unyanked(&vs(&[
+                ("1.0.0", false),
+                ("2.0.0-rc.1", false),
+                ("1.1.0", true)
+            ])),
+            Some("1.0.0")
+        );
+        // A pre-release when nothing else is left.
+        assert_eq!(
+            latest_unyanked(&vs(&[
+                ("2.0.0-rc.1", false),
+                ("2.0.0-rc.2", false),
+                ("1.0.0", true)
+            ])),
+            Some("2.0.0-rc.2")
+        );
+        // Nothing unyanked, or nothing that can be placed.
+        assert_eq!(latest_unyanked(&vs(&[("1.0.0", true)])), None);
+        assert_eq!(
+            latest_unyanked(&vs(&[("banana", false), ("1.0.0", true)])),
+            None
+        );
+
+        let doc = packument(
+            "@acme/widget",
+            &vs(&[("1.0.0", false), ("1.1.0", true), ("2.0.0-beta", true)]),
+            &[
+                ("latest".to_string(), "1.1.0".to_string()),
+                ("next".to_string(), "2.0.0-beta".to_string()),
+                ("stable".to_string(), "1.1.0".to_string()),
+            ],
+            |v| v.filename.clone(),
+            |_| ("s".into(), "i".into()),
+        );
+        assert_eq!(
+            doc["dist-tags"],
+            serde_json::json!({ "latest": "1.0.0", "next": "2.0.0-beta", "stable": "1.1.0" }),
+            "only latest is repointed, and only because it names a yanked version"
+        );
+        let all_yanked = packument(
+            "@acme/widget",
+            &vs(&[("1.0.0", true)]),
+            &[("latest".to_string(), "1.0.0".to_string())],
+            |v| v.filename.clone(),
+            |_| ("s".into(), "i".into()),
+        );
+        assert_eq!(all_yanked["dist-tags"], serde_json::json!({}));
+        assert!(all_yanked["versions"]["1.0.0"]["deprecated"].is_string());
     }
 
     /// Unparseable stored metadata must not take the whole packument
